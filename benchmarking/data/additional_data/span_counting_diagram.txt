@@ -1,0 +1,92 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    TRAIL BENCHMARK: SPAN COUNTING METHODS                     ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  METHOD 1: NON-RECURSIVE (Used in Table 5)                                  │
+│  Counts: Main Spans + Level 1 Children ONLY                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    ┌────────────────────────────────────────────┐
+    │  [Main Span: "main"]                       │  ◄── ✓ COUNTED
+    │  span_id: "70823946a0b7272c"               │
+    └────────────────────────────────────────────┘
+              │
+              ├─────────────────────────┬──────────────────────────
+              │                         │
+              ▼                         ▼
+    ┌─────────────────────┐   ┌─────────────────────────────┐
+    │ [Child Span 1]      │   │ [Child Span 2]              │
+    │ "get_examples"      │   │ "answer_question"           │  ◄── ✓ COUNTED
+    │ span_id: "9c37..."  │   │ span_id: "c82a..."          │
+    └─────────────────────┘   └─────────────────────────────┘
+              │                         │
+              │                         ├────────┬────────┬────────
+              │                         ▼        ▼        ▼
+              ▼               ┌──────────┐ ┌─────────┐ ┌─────────┐
+      [No children]           │[GChild 1]│ │[GChild 2│ │[GChild 3│  ◄── ✗ NOT COUNTED
+                              │"create"  │ │"run"    │ │"tool"   │
+                              └──────────┘ └─────────┘ └─────────┘
+                                                           │
+                                                           ▼
+                                                    [Gt-GChild...]  ◄── ✗ NOT COUNTED
+
+    SPAN COUNT: 1 (main) + 2 (level 1 children) = 3 spans
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  METHOD 2: RECURSIVE (All Nested Spans)                                     │
+│  Counts: Main Spans + ALL Children at ALL Levels                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    ┌────────────────────────────────────────────┐
+    │  [Main Span: "main"]                       │  ◄── ✓ COUNTED
+    │  span_id: "70823946a0b7272c"               │
+    └────────────────────────────────────────────┘
+              │
+              ├─────────────────────────┬──────────────────────────
+              │                         │
+              ▼                         ▼
+    ┌─────────────────────┐   ┌─────────────────────────────┐
+    │ [Child Span 1]      │   │ [Child Span 2]              │  ◄── ✓ COUNTED
+    │ "get_examples"      │   │ "answer_question"           │
+    │ span_id: "9c37..."  │   │ span_id: "c82a..."          │
+    └─────────────────────┘   └─────────────────────────────┘
+              │                         │
+              │                         ├────────┬────────┬────────
+              │                         ▼        ▼        ▼
+              ▼               ┌──────────┐ ┌─────────┐ ┌─────────┐
+      [No children]           │[GChild 1]│ │[GChild 2│ │[GChild 3│  ◄── ✓ COUNTED
+                              │"create"  │ │"run"    │ │"tool"   │
+                              └──────────┘ └─────────┘ └─────────┘
+                                                           │
+                                                           ├────┬────
+                                                           ▼    ▼
+                                                    [Gt-GChild...]  ◄── ✓ COUNTED
+                                                    [Gt-GChild...]  ◄── ✓ COUNTED
+
+    SPAN COUNT: 1 + 2 + 3 + 2 + ... = 11+ spans (all nested levels)
+
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                           GAIA DATASET STATISTICS                             ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  Traces Analyzed: 118                                                         ║
+║                                                                                ║
+║  Non-Recursive (Table 5):        Recursive (All Nested):                      ║
+║  ├─ Total Spans: 977            ├─ Total Spans: 4,579                        ║
+║  ├─ Avg per Trace: 8.28         ├─ Avg per Trace: 38.81                      ║
+║  ├─ Min: 3                       ├─ Min: 11                                   ║
+║  └─ Max: 626                     └─ Max: 1,000                                ║
+║                                                                                ║
+║  Difference: 3,602 spans (4.69x more with recursive counting!)                ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+
+KEY TAKEAWAY:
+═════════════
+If you're getting 3K+ spans in GAIA, you're counting RECURSIVELY (all nested).
+Table 5 uses NON-RECURSIVE counting (main + level 1 only) → ~977 spans.
+
+To reproduce Table 5:
+$ python span_counter.py --input-dir /path/to/gaia --non-recursive
