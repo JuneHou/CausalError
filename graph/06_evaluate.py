@@ -127,12 +127,15 @@ def run_inference(
     adj: torch.Tensor,
     device: torch.device,
     threshold: float = 0.5,
-) -> tuple[np.ndarray, np.ndarray, dict]:
+    label_map: dict | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict, float, float]:
     """
     Returns:
-        y_true: (T, 19) multi-label ground truth per trace
-        y_pred: (T, 19) predicted labels per trace
-        trace_results: dict of per-trace prediction details
+        y_true:     (T, 19) multi-label ground truth per trace
+        y_pred:     (T, 19) predicted labels per trace
+        trace_results: dict of per-trace prediction details (includes loc/joint acc)
+        loc_acc:    average span-level location accuracy across traces
+        joint_acc:  average span-level (span_id, category) joint accuracy across traces
     """
     model.eval()
     Z = model.encode_graph(x.to(device), adj.to(device))  # (20, hidden_dim)
@@ -143,6 +146,7 @@ def run_inference(
 
     y_true_list, y_pred_list = [], []
     trace_results = {}
+    loc_acc_list, joint_acc_list = [], []
 
     for tid, trace_spans in sorted(by_trace.items()):
         embs = torch.stack([sp["emb"] for sp in trace_spans]).to(device)  # (K, feat_dim)
@@ -163,23 +167,86 @@ def run_inference(
 
         y_true_list.append(gt)
         y_pred_list.append(pred)
+
+        # ---- Span-level location metrics ----
+        span_probs_np = probs[:, :CORRECT_IDX].numpy()  # (K, 19)
+
+        # A span is predicted as an error if any error-type probability exceeds threshold
+        pred_error = span_probs_np.max(axis=1) > threshold        # (K,) bool
+        gt_error   = np.array([not sp["is_correct"] for sp in trace_spans])  # (K,)
+
+        # Location accuracy: |GT_error_spans ∩ pred_error_spans| / |GT_error_spans|
+        # Matches the paper's calculate_scores.py formula (recall-based over span id sets).
+        gt_span_ids   = {sp["span_id"] for sp in trace_spans if not sp["is_correct"]}
+        pred_span_ids = {sp["span_id"] for sp, is_err in zip(trace_spans, pred_error) if is_err}
+        loc_acc = len(gt_span_ids & pred_span_ids) / len(gt_span_ids) if gt_span_ids else (1.0 if not pred_span_ids else 0.0)
+        loc_acc_list.append(loc_acc)
+
+        # Joint accuracy: |GT_(span_id,cat) pairs ∩ pred_pairs| / |GT_pairs|
+        gt_pairs, pred_pairs = set(), set()
+        for k, sp in enumerate(trace_spans):
+            sid = sp["span_id"]
+            if not sp["is_correct"]:
+                for cat in sp["labels"]:
+                    gt_pairs.add((sid, cat))
+            if label_map is not None:
+                for cat, cat_idx in label_map.items():
+                    if cat_idx < CORRECT_IDX and span_probs_np[k, cat_idx] > threshold:
+                        pred_pairs.add((sid, cat))
+
+        joint_acc = len(gt_pairs & pred_pairs) / len(gt_pairs) if gt_pairs else (1.0 if not pred_pairs else 0.0)
+        joint_acc_list.append(joint_acc)
+
         trace_results[tid] = {
             "pred_indices": pred.nonzero()[0].tolist(),
             "true_indices": gt.nonzero()[0].tolist(),
             "trace_max":    trace_max.tolist(),
+            "location_acc": loc_acc,
+            "joint_acc":    joint_acc,
         }
 
-    return np.array(y_true_list), np.array(y_pred_list), trace_results
+    avg_loc_acc   = float(np.mean(loc_acc_list))   if loc_acc_list   else 0.0
+    avg_joint_acc = float(np.mean(joint_acc_list)) if joint_acc_list else 0.0
+    return np.array(y_true_list), np.array(y_pred_list), trace_results, avg_loc_acc, avg_joint_acc
 
 
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser(description="Evaluate best GAT on test set")
-    ap.add_argument("--model_path", default=str(MODEL_DIR / "best_model.pt"))
+    ap.add_argument("--model_path", default=None,
+                    help="Path to best_model.pt checkpoint (default: graph/models/best_model.pt, "
+                         "or graph/models_{split_tag}/best_model.pt if --split_tag is set)")
     ap.add_argument("--split",      default="test", choices=["val", "test"])
     ap.add_argument("--gpu",        type=int, default=0)
     ap.add_argument("--threshold",  type=float, default=0.5)
+    ap.add_argument("--split_tag",  default="",
+                    help="Tag suffix for data/output dirs (e.g. 'swe' → data_swe/, outputs_swe/). "
+                         "Also shifts default model_path to models_{split_tag}/best_model.pt.")
+    ap.add_argument("--out_dir",   default=None,
+                    help="Override output directory for eval_results JSON "
+                         "(default: graph/outputs/ or graph/outputs_{split_tag}/)")
     args = ap.parse_args()
+
+    # Apply split_tag to module-level path variables
+    if args.split_tag:
+        tag = f"_{args.split_tag}"
+        global DATA_DIR, OUTPUT_DIR, MODEL_DIR
+        global DATASET_FILE, GRAPH_INPUT, LABEL_MAP_FILE
+        DATA_DIR       = BENCH_DIR / "graph" / f"data{tag}"
+        OUTPUT_DIR     = BENCH_DIR / "graph" / f"outputs{tag}"
+        MODEL_DIR      = BENCH_DIR / "graph" / f"models{tag}"
+        DATASET_FILE   = DATA_DIR / "span_dataset.jsonl"
+        GRAPH_INPUT    = DATA_DIR / "graph_input.pt"
+        LABEL_MAP_FILE = DATA_DIR / "label_to_node_idx.json"
+
+    if args.out_dir:
+        OUTPUT_DIR = Path(args.out_dir)
+
+    # Resolve model path: explicit > split_tag model dir > default
+    if args.model_path:
+        model_path = Path(args.model_path)
+    else:
+        model_path = MODEL_DIR / "best_model.pt"
 
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -194,7 +261,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Load model (must happen before adj so we can read adj_type from checkpoint)
     # ------------------------------------------------------------------
-    ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
+    ckpt = torch.load(model_path, map_location=device, weights_only=False)
     saved_args = ckpt["args"]
 
     # Reconstruct the same adjacency used during training
@@ -210,8 +277,8 @@ def main() -> None:
     log.info("adj_type=%s (from checkpoint)", saved_args.get("adj_type", "golden"))
     feat_dim = ckpt.get("feat_dim", 4096)
     # Use the val-tuned threshold unless overridden on the command line
-    threshold = ckpt.get("val_threshold", args.threshold)
-    log.info("Using threshold=%.2f (from val tuning)", threshold)
+    threshold = 0.5
+    log.info("Using fixed threshold=0.50")
 
     model = GATModel(
         feat_dim=feat_dim,
@@ -238,8 +305,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
-    y_true, y_pred, trace_results = run_inference(
-        model, test_spans, x, adj, device, threshold
+    y_true, y_pred, trace_results, loc_acc, joint_acc = run_inference(
+        model, test_spans, x, adj, device, threshold, label_map=label_map
     )
 
     # ------------------------------------------------------------------
@@ -254,6 +321,8 @@ def main() -> None:
     print(f"{'='*60}")
     print(classification_report(y_true, y_pred, target_names=error_names, zero_division=0))
     print_metrics(metrics)
+    print(f"Location Accuracy (Loc. Acc.):  {loc_acc:.4f}")
+    print(f"Joint Accuracy    (Joint Acc.): {joint_acc:.4f}")
 
     # ------------------------------------------------------------------
     # Save results
@@ -263,6 +332,8 @@ def main() -> None:
         "n_traces":          len(trace_results),
         "threshold":         threshold,
         **{k: v for k, v in metrics.items() if k != "per_class"},
+        "location_accuracy": loc_acc,
+        "joint_accuracy":    joint_acc,
         "per_class":         metrics["per_class"],
         "trace_predictions": trace_results,
     }

@@ -34,17 +34,18 @@ import pandas as pd
 # Validated causal edges (A → B): assigned weight = 1.0
 # ---------------------------------------------------------------------------
 CAUSAL_EDGES = {
-    ("Formatting Errors", "Tool Output Misinterpretation"),
-    ("Formatting Errors", "Incorrect Problem Identification"),
+    # Validated via do(A=0) intervention on GAIA+SWE train split only
+    # Source: benchmarking/outputs/interventions_train_final3/effect_edges.json
     ("Formatting Errors", "Context Handling Failures"),
+    ("Formatting Errors", "Incorrect Problem Identification"),
+    ("Formatting Errors", "Poor Information Retrieval"),
     ("Formatting Errors", "Resource Abuse"),
+    ("Formatting Errors", "Tool Output Misinterpretation"),
     ("Incorrect Problem Identification", "Tool Output Misinterpretation"),
-    ("Poor Information Retrieval", "Resource Abuse"),
-    ("Resource Abuse", "Authentication Errors"),
-    ("Resource Abuse", "Tool-related"),
-    ("Task Orchestration", "Context Handling Failures"),
-    ("Tool Selection Errors", "Language-only"),
+    ("Instruction Non-compliance", "Context Handling Failures"),
+    ("Task Orchestration", "Language-only"),
     ("Tool Selection Errors", "Goal Deviation"),
+    ("Tool-related", "Goal Deviation"),
 }
 
 

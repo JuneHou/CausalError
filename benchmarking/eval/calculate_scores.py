@@ -240,8 +240,14 @@ def main(ground_truth_dir: str, generated_dir: str):
             files_processed += 1
             
         except Exception as e:
-            print(f"Error processing {file}: {e}")
-            continue
+            print(f"Error processing {file}: {e} — counting as empty prediction")
+            generated = {"errors": [], "scores": []}
+            metrics = calculate_metrics(ground_truth, generated, all_categories)
+            all_y_true.append(metrics["y_true"])
+            all_y_pred.append(metrics["y_pred"])
+            location_accuracy_sum += metrics["location_accuracy"]
+            joint_accuracy_sum += metrics["joint_accuracy"]
+            files_processed += 1
 
     # Calculate average metrics
     if files_processed > 0:
@@ -360,11 +366,18 @@ def main(ground_truth_dir: str, generated_dir: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--results_dir", type=str, default="results", help="Directory containing generated results")
+    parser.add_argument("--results_dir", type=str, default="outputs/zero_shot", help="Directory containing generated results")
     args = parser.parse_args()
     
     for i in glob.glob(f"{args.results_dir}/*"):
-        split = i.split("-")[-1].lower().replace(" ", "_")
+        # Detect known split names anywhere in the directory name
+        dirname_lower = os.path.basename(i).lower()
+        if "swe_bench" in dirname_lower or "swe-bench" in dirname_lower or "swe bench" in dirname_lower:
+            split = "swe_bench"
+        elif "gaia" in dirname_lower:
+            split = "gaia"
+        else:
+            split = dirname_lower.split("-")[-1].replace(" ", "_")
         results = main(ground_truth_dir=f"processed_annotations_{split}", generated_dir=f"{i}")
         if not results:
             continue

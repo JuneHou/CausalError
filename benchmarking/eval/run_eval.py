@@ -2,7 +2,6 @@ import os
 import glob
 import time
 import argparse
-import tiktoken
 import concurrent.futures
 from tqdm import tqdm
 from dotenv import load_dotenv, find_dotenv
@@ -138,7 +137,7 @@ The data to analyze is as follows:
     return prompt.format(trace=trace)
 
 
-def call_litellm(trace: str, model: str = "openai/gpt-4o"):
+def call_litellm(trace: str, model: str = "openai/gpt-4o", api_base: str = None):
     prompt = get_prompt(trace)
 
     if (
@@ -149,12 +148,7 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o"):
         or "gemini-2.5" in model
     ):
         params = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            "messages": [{"role": "user", "content": prompt}],
             "model": model,
             "max_completion_tokens": 8000,
             "reasoning_effort": "high",
@@ -162,12 +156,7 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o"):
         }
     else:
         params = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            "messages": [{"role": "user", "content": prompt}],
             "model": model,
             "temperature": 0.0,
             "top_p": 1,
@@ -176,22 +165,32 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o"):
             "drop_params": True,
         }
 
-    try:
-        response = completion(**params)
-    except RateLimitError as e:
-        print(f"Rate limit error: {e}. Sleeping for 30 seconds and retrying...")
-        time.sleep(60)
-        response = completion(**params)
-    return response.choices[0].message["content"]
+    if api_base:
+        params["api_base"] = api_base
+        dmx_key = os.environ.get("DMX_API_KEY")
+        if dmx_key:
+            params["api_key"] = dmx_key
+
+    for attempt in range(3):
+        try:
+            response = completion(**params)
+            return response.choices[0].message["content"]
+        except RateLimitError as e:
+            print(f"Rate limit error (attempt {attempt+1}/3): sleeping 60s and retrying...")
+            time.sleep(60)
+    raise RateLimitError("Exceeded 3 retries due to rate limiting")
 
 
-def process_file(file_path, output_dir, model):
-    
+def process_file(file_path, output_dir, model, api_base=None):
+    output_file = f"{output_dir}/{file_path.split('/')[-1]}"
+    if os.path.exists(output_file):
+        return file_path  # already done, skip
+
     with open(file_path, "r") as f:
         trace = f.read()
 
     try:
-        response = call_litellm(trace=trace, model=model)
+        response = call_litellm(trace=trace, model=model, api_base=api_base)
     except ContextWindowExceededError as e:
         print(
             f"Context window excceded for trace: {file_path}: {e}. Creating empty output file."
@@ -215,11 +214,12 @@ def run_eval(
     output_dir: str = "output",
     model: str = "openai/gpt-4o",
     max_workers=1,
+    api_base: str = None,
 ):
     file_paths = glob.glob(f"{directory}/*.json")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(process_file, file_path, output_dir, model)
+            executor.submit(process_file, file_path, output_dir, model, api_base)
             for file_path in file_paths
         ]
         for future in tqdm(
@@ -245,7 +245,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="outputs",
+        default="outputs/zero_shot",
         help="Output directory for the evaluation results",
     )
     parser.add_argument(
@@ -260,6 +260,13 @@ def main():
         default="GAIA",
         help="Split of the dataset to evaluate (`GAIA` or `SWE Bench`)",
     )
+    parser.add_argument(
+        "--api_base",
+        type=str,
+        default=None,
+        help="Custom API base URL for OpenAI-compatible proxies (e.g. https://www.DMXapi.com/v1). "
+             "Set OPENAI_API_KEY in .env to your proxy key.",
+    )
     args = parser.parse_args()
     directory_containing_dataset = args.data_dir
 
@@ -273,7 +280,8 @@ def main():
         f"{args.output_dir}/outputs_{args.model.replace('/', '-')}-{args.split}",
         model=args.model,
         max_workers=args.max_workers,
-    )        
+        api_base=args.api_base,
+    )
 
 if __name__ == "__main__":
     litellm.drop_params = True

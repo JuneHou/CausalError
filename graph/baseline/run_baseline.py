@@ -255,7 +255,7 @@ def train(args: argparse.Namespace) -> None:
     bce_weighted = nn.BCEWithLogitsLoss(pos_weight=pos_weights)
     bce          = nn.BCEWithLogitsLoss()   # unweighted, for L_graph
 
-    best_f1, best_thr, best_epoch = 0.0, 0.5, 0
+    best_f1, best_thr, best_epoch = -1.0, 0.5, 0
     patience_counter = 0
 
     loss_desc = f"L = L_span + {args.lambda_graph}·L_graph" if args.lambda_graph > 0 else "L = L_span"
@@ -338,16 +338,16 @@ def evaluate(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     # Load model checkpoint
     # ------------------------------------------------------------------
-    ckpt_path = MODEL_DIR / "best_model.pt"
+    ckpt_path = Path(args.model_path) if getattr(args, "model_path", None) else MODEL_DIR / "best_model.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"{ckpt_path} — run training first")
 
     ckpt      = torch.load(ckpt_path, map_location=device, weights_only=False)
     saved     = ckpt["args"]
     feat_dim  = ckpt.get("feat_dim", 4096)
-    threshold = ckpt.get("val_threshold", 0.5)
-    log.info("Loaded checkpoint from epoch %d (val F1=%.4f, threshold=%.2f)",
-             ckpt["epoch"], ckpt["val_f1"], threshold)
+    threshold = 0.5
+    log.info("Loaded checkpoint from epoch %d (val F1=%.4f, fixed threshold=0.50)",
+             ckpt["epoch"], ckpt["val_f1"])
 
     model = NoGraphBaseline(
         feat_dim   = feat_dim,
@@ -382,7 +382,9 @@ def evaluate(args: argparse.Namespace) -> None:
         log.info("Evaluating on %s (%d spans, threshold=%.2f)...", split, len(spans), threshold)
 
         # run_inference from 06_evaluate.py — uses encode_graph + score_spans API
-        y_true, y_pred, trace_results = run_inference(model, spans, x, adj, device, threshold)
+        y_true, y_pred, trace_results, loc_acc, joint_acc = run_inference(
+            model, spans, x, adj, device, threshold, label_map=label_map
+        )
 
         metrics = compute_metrics(y_true, y_pred, error_names)
 
@@ -391,6 +393,8 @@ def evaluate(args: argparse.Namespace) -> None:
         print(f"{'='*60}")
         print(classification_report(y_true, y_pred, target_names=error_names, zero_division=0))
         print_metrics(metrics)
+        print(f"Location Accuracy (Loc. Acc.):  {loc_acc:.4f}")
+        print(f"Joint Accuracy    (Joint Acc.): {joint_acc:.4f}")
 
         results = {
             "model":             "NoGraphBaseline",
@@ -398,6 +402,8 @@ def evaluate(args: argparse.Namespace) -> None:
             "n_traces":          len(trace_results),
             "threshold":         threshold,
             **{k: v for k, v in metrics.items() if k != "per_class"},
+            "location_accuracy": loc_acc,
+            "joint_accuracy":    joint_acc,
             "per_class":         metrics["per_class"],
             "trace_predictions": trace_results,
         }
@@ -431,7 +437,26 @@ def main() -> None:
     # Evaluation-only mode
     ap.add_argument("--eval_only", action="store_true",
                     help="Skip training; load best_model.pt and evaluate")
+    ap.add_argument("--model_path", default=None,
+                    help="Path to checkpoint for evaluation (default: baseline/models/best_model.pt "
+                         "or baseline/models_{split_tag}/best_model.pt). Use to load a GAIA-trained "
+                         "model when evaluating on a different dataset (e.g. --split_tag swe).")
+    ap.add_argument("--split_tag", default="",
+                    help="Tag suffix for data/model/output dirs (e.g. '712' → data_712/, "
+                         "models_712/, outputs_712/). Empty = default dirs.")
     args = ap.parse_args()
+
+    # Apply split_tag to module-level path variables
+    if args.split_tag:
+        tag = f"_{args.split_tag}"
+        global DATA_DIR, MODEL_DIR, OUTPUT_DIR
+        global DATASET_FILE, GRAPH_INPUT, LABEL_MAP_FILE
+        DATA_DIR       = GRAPH_DIR / f"data{tag}"
+        MODEL_DIR      = BASELINE_DIR / f"models{tag}"
+        OUTPUT_DIR     = BASELINE_DIR / f"outputs{tag}"
+        DATASET_FILE   = DATA_DIR / "span_dataset.jsonl"
+        GRAPH_INPUT    = DATA_DIR / "graph_input.pt"
+        LABEL_MAP_FILE = DATA_DIR / "label_to_node_idx.json"
 
     if not args.eval_only:
         train(args)

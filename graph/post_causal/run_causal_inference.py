@@ -234,26 +234,101 @@ def causal_gate_intervention(
 
 
 # ---------------------------------------------------------------------------
-# Val grid-search over β × threshold
+# Span-level location and joint accuracy (error step detection)
 # ---------------------------------------------------------------------------
 
-def sweep_beta_threshold(
+@torch.no_grad()
+def compute_span_location_metrics(
+    model: "NoGraphBaseline",
+    spans: list[dict],
+    x: torch.Tensor,
+    adj: torch.Tensor,
+    device: torch.device,
+    threshold: float,
+    A_col: np.ndarray,
+    A_raw: np.ndarray,
+    beta: float,
+    label_map: dict,
+) -> tuple[float, float]:
+    """
+    Compute Loc. Acc. and Joint Acc. after applying the causal gate at span level.
+
+    The causal gate is trace-level (gate(t, i) derived from trace max-pool probs),
+    but applied multiplicatively to each span's raw probabilities:
+        p_causal_span(k, i) = sigmoid(score(k, i)) * (β + (1-β) * gate(t, i))
+
+    Returns:
+        loc_acc   — average fraction of GT error spans correctly identified
+        joint_acc — average fraction of GT (span_id, category) pairs correctly predicted
+    """
+    from collections import defaultdict
+    model.eval()
+    Z = model.encode_graph(x.to(device), adj.to(device))
+
+    by_trace = defaultdict(list)
+    for sp in spans:
+        by_trace[sp["trace_id"]].append(sp)
+
+    loc_acc_list, joint_acc_list = [], []
+
+    for tid in sorted(by_trace.keys()):
+        trace_spans = by_trace[tid]
+        embs   = torch.stack([sp["emb"] for sp in trace_spans]).to(device)
+        scores = model.score_spans(embs, Z)
+        span_probs = torch.sigmoid(scores).cpu().numpy()[:, :CORRECT_IDX]  # (K, 19)
+
+        # Trace-level max-pool used for the causal gate
+        trace_max = span_probs.max(axis=0, keepdims=True)  # (1, 19)
+        gate = trace_max @ A_col                           # (1, 19) predecessor support
+        has_pred = A_raw.sum(axis=0) > 0
+        gate[:, ~has_pred] = 1.0
+        eff_gate = beta + (1.0 - beta) * gate              # (1, 19) in [β, 1]
+        span_probs_causal = span_probs * eff_gate          # (K, 19) broadcast
+
+        # Location accuracy: |GT_error_spans ∩ pred_error_spans| / |GT_error_spans|
+        pred_error = span_probs_causal.max(axis=1) > threshold  # (K,)
+        gt_span_ids   = {sp["span_id"] for sp in trace_spans if not sp["is_correct"]}
+        pred_span_ids = {sp["span_id"] for sp, is_err in zip(trace_spans, pred_error) if is_err}
+        loc_acc = len(gt_span_ids & pred_span_ids) / len(gt_span_ids) if gt_span_ids else (1.0 if not pred_span_ids else 0.0)
+        loc_acc_list.append(loc_acc)
+
+        # Joint accuracy: |GT_(span_id,cat) pairs ∩ pred_pairs| / |GT_pairs|
+        gt_pairs, pred_pairs = set(), set()
+        for k, sp in enumerate(trace_spans):
+            sid = sp["span_id"]
+            if not sp["is_correct"]:
+                for cat in sp["labels"]:
+                    gt_pairs.add((sid, cat))
+            for cat, cat_idx in label_map.items():
+                if cat_idx < CORRECT_IDX and span_probs_causal[k, cat_idx] > threshold:
+                    pred_pairs.add((sid, cat))
+
+        joint_acc = len(gt_pairs & pred_pairs) / len(gt_pairs) if gt_pairs else (1.0 if not pred_span_ids else 0.0)
+        joint_acc_list.append(joint_acc)
+
+    return float(np.mean(loc_acc_list)), float(np.mean(joint_acc_list))
+
+
+# ---------------------------------------------------------------------------
+# Val grid-search over β (threshold fixed at 0.5)
+# ---------------------------------------------------------------------------
+
+def sweep_beta(
     p_base: np.ndarray,
     y_true: np.ndarray,
     A_col: np.ndarray,
     A_raw: np.ndarray,
     betas: list[float],
-    thresholds: list[float],
-) -> tuple[float, float, float]:
-    best_f1, best_beta, best_thr = 0.0, 1.0, 0.5
+) -> tuple[float, float]:
+    """Sweep β only; threshold is fixed at 0.5."""
+    best_f1, best_beta = 0.0, 1.0
     for beta in betas:
         p_causal = causal_gate_intervention(p_base, A_col, A_raw, beta)
-        for thr in thresholds:
-            y_pred = (p_causal > thr).astype(int)
-            f1 = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
-            if f1 > best_f1:
-                best_f1, best_beta, best_thr = f1, beta, thr
-    return best_beta, best_thr, best_f1
+        y_pred = (p_causal > 0.5).astype(int)
+        f1 = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+        if f1 > best_f1:
+            best_f1, best_beta = f1, beta
+    return best_beta, best_f1
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +343,23 @@ def main() -> None:
     ap.add_argument("--beta",      type=float, default=None,
                     help="Gate floor β (0=full suppression, 1=no intervention). "
                          "Default: sweep on val.")
-    ap.add_argument("--threshold", type=float, default=None,
-                    help="Decision threshold. Default: sweep on val.")
     ap.add_argument("--gpu",       type=int,   default=0)
+    ap.add_argument("--split_tag", default="",
+                    help="Tag suffix for data/model/output dirs (e.g. '712' → data_712/, "
+                         "models_712/, outputs_712/). Empty = default dirs.")
     args = ap.parse_args()
+
+    # Apply split_tag to module-level path variables
+    if args.split_tag:
+        tag = f"_{args.split_tag}"
+        global DATA_DIR, MODEL_DIR, OUTPUT_DIR
+        global DATASET_FILE, GRAPH_INPUT, LABEL_MAP_FILE
+        DATA_DIR       = GRAPH_DIR / f"data{tag}"
+        MODEL_DIR      = BASELINE_DIR / f"models{tag}"
+        OUTPUT_DIR     = POST_DIR / f"outputs{tag}"
+        DATASET_FILE   = DATA_DIR / "span_dataset.jsonl"
+        GRAPH_INPUT    = DATA_DIR / "graph_input.pt"
+        LABEL_MAP_FILE = DATA_DIR / "label_to_node_idx.json"
 
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -297,9 +385,9 @@ def main() -> None:
     ckpt     = torch.load(ckpt_path, map_location=device, weights_only=False)
     saved    = ckpt["args"]
     feat_dim = ckpt.get("feat_dim", 4096)
-    base_thr = ckpt.get("val_threshold", 0.5)
-    log.info("Loaded baseline model: epoch=%d  val_F1=%.4f  base_threshold=%.2f",
-             ckpt["epoch"], ckpt["val_f1"], base_thr)
+    base_thr = 0.5
+    log.info("Loaded baseline model: epoch=%d  val_F1=%.4f  fixed_threshold=0.50",
+             ckpt["epoch"], ckpt["val_f1"])
 
     model = NoGraphBaseline(
         feat_dim   = feat_dim,
@@ -324,19 +412,18 @@ def main() -> None:
         emb_dict = torch.load(DATA_DIR / f"span_embeddings_{split}.pt", weights_only=True)
         spans    = build_flat_span_list(DATASET_FILE, split, emb_dict, label_map, n_nodes)
         p_base, y_true = get_trace_probs(model, spans, x, adj, device)
-        splits[split]  = {"p_base": p_base, "y_true": y_true}
+        splits[split]  = {"p_base": p_base, "y_true": y_true, "spans": spans}
         log.info("%s: %d traces, %d positive labels",
                  split, len(p_base), y_true.sum())
 
     # ------------------------------------------------------------------
-    # Tune β and threshold on val
+    # Tune β on val (threshold fixed at 0.5)
     # ------------------------------------------------------------------
-    betas      = [round(b, 2) for b in np.arange(0.0, 1.05, 0.05)]
-    thresholds = [round(t, 2) for t in np.arange(0.05, 0.55, 0.05)]
+    best_thr = 0.5
+    betas    = [round(b, 2) for b in np.arange(0.0, 1.05, 0.05)]
 
-    if args.beta is not None and args.threshold is not None:
+    if args.beta is not None:
         best_beta = args.beta
-        best_thr  = args.threshold
         p_val = causal_gate_intervention(
             splits["val"]["p_base"], A_col, A_raw, best_beta
         )
@@ -345,17 +432,17 @@ def main() -> None:
             (p_val > best_thr).astype(int),
             average="weighted", zero_division=0,
         ))
-        log.info("Using fixed β=%.2f, threshold=%.2f → val weighted F1=%.4f",
-                 best_beta, best_thr, best_val_f1)
+        log.info("Using fixed β=%.2f, threshold=0.50 → val weighted F1=%.4f",
+                 best_beta, best_val_f1)
     else:
-        log.info("Sweeping β ∈ [0..1] × threshold ∈ [0.05..0.50] on val (%d combinations)...",
-                 len(betas) * len(thresholds))
-        best_beta, best_thr, best_val_f1 = sweep_beta_threshold(
+        log.info("Sweeping β ∈ [0..1] on val (%d values, threshold fixed at 0.50)...",
+                 len(betas))
+        best_beta, best_val_f1 = sweep_beta(
             splits["val"]["p_base"], splits["val"]["y_true"],
-            A_col, A_raw, betas, thresholds,
+            A_col, A_raw, betas,
         )
-        log.info("Best val: β=%.2f, threshold=%.2f → weighted F1=%.4f",
-                 best_beta, best_thr, best_val_f1)
+        log.info("Best val: β=%.2f, threshold=0.50 → weighted F1=%.4f",
+                 best_beta, best_val_f1)
 
     # ------------------------------------------------------------------
     # Evaluate both splits
@@ -365,6 +452,7 @@ def main() -> None:
     for split in ("val", "test"):
         p_base  = splits[split]["p_base"]
         y_true  = splits[split]["y_true"]
+        spans   = splits[split]["spans"]
 
         p_causal = causal_gate_intervention(p_base, A_col, A_raw, best_beta)
         y_pred   = (p_causal > best_thr).astype(int)
@@ -376,6 +464,12 @@ def main() -> None:
         metrics  = compute_metrics(y_true, y_pred, error_names)
         delta_f1 = metrics["f1_weighted"] - base_metrics["f1_weighted"]
 
+        # Span-level location and joint accuracy (error step detection)
+        loc_acc, joint_acc = compute_span_location_metrics(
+            model, spans, x, adj, device, best_thr,
+            A_col, A_raw, best_beta, label_map,
+        )
+
         print(f"\n{'='*60}")
         print(f"Causal gate intervention (β={best_beta:.2f}, thr={best_thr:.2f}) — {split} set")
         print(f"{'='*60}")
@@ -383,6 +477,8 @@ def main() -> None:
         print_metrics(metrics, header="--- Causal gate ---")
         print_metrics(base_metrics, header=f"\n--- Baseline (no intervention, thr={base_thr:.2f}) ---")
         print(f"\nΔ F1 weighted vs baseline: {delta_f1:+.4f}")
+        print(f"Location Accuracy (Loc. Acc.):  {loc_acc:.4f}")
+        print(f"Joint Accuracy    (Joint Acc.): {joint_acc:.4f}")
 
         all_results[split] = {
             "model":                "Baseline+CausalGate",
@@ -391,6 +487,8 @@ def main() -> None:
             "threshold":            best_thr,
             "n_traces":             int(len(p_base)),
             **{k: v for k, v in metrics.items() if k != "per_class"},
+            "location_accuracy":    loc_acc,
+            "joint_accuracy":       joint_acc,
             "per_class":            metrics["per_class"],
             "baseline_f1_weighted": base_metrics["f1_weighted"],
             "delta_f1_weighted":    delta_f1,

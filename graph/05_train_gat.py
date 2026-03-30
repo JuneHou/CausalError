@@ -344,20 +344,18 @@ def evaluate_cat_f1(
     threshold: float = 0.5,
 ) -> tuple[float, float]:
     """
-    Returns (best_f1, best_threshold) — sweeps thresholds [0.05..0.5] to find
-    the best val F1. This is needed because class imbalance causes equilibrium
-    probabilities to be well below 0.5 for rare error types.
+    Returns (f1, threshold) — evaluates at fixed threshold=0.5.
+    Threshold is kept as a parameter for API compatibility but always fixed at 0.5.
     """
     model.eval()
     Z = model.encode_graph(x.to(device), adj.to(device))
 
-    # Group by trace_id; collect all trace max-probs and ground truths
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for sp in spans:
         by_trace[sp["trace_id"]].append(sp)
 
-    trace_maxes = []    # list of (19,) numpy arrays
-    y_true_list = []    # list of (19,) int arrays
+    trace_maxes = []
+    y_true_list = []
 
     for tid, trace_spans in by_trace.items():
         embs = torch.stack([sp["emb"] for sp in trace_spans]).to(device)
@@ -374,22 +372,14 @@ def evaluate_cat_f1(
         y_true_list.append(gt)
 
     if not trace_maxes:
-        return 0.0, threshold
+        return 0.0, 0.5
 
-    y_true = np.array(y_true_list)               # (T, 19)
-    all_maxes = np.array(trace_maxes)            # (T, 19)
+    y_true    = np.array(y_true_list)   # (T, 19)
+    all_maxes = np.array(trace_maxes)   # (T, 19)
 
-    # Sweep thresholds; pick the one giving highest weighted F1.
-    # Start at 0.10 (not 0.05) to avoid degenerate "predict everything" when
-    # model scores are uniformly low (~0.05-0.20 range).
-    best_f1, best_thr = 0.0, threshold
-    for thr in np.arange(0.10, 0.55, 0.05):
-        y_pred = (all_maxes > thr).astype(int)
-        f1 = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
-        if f1 > best_f1:
-            best_f1, best_thr = f1, float(thr)
-
-    return best_f1, best_thr
+    y_pred = (all_maxes > 0.5).astype(int)
+    f1     = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+    return f1, 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +463,7 @@ def train(args: argparse.Namespace) -> None:
 
     bce_weighted = nn.BCEWithLogitsLoss(pos_weight=pos_weights)
 
-    best_f1    = 0.0
+    best_f1    = -1.0
     best_thr   = 0.5
     best_epoch = 0
     patience_counter = 0
@@ -577,7 +567,20 @@ def main() -> None:
                          "random (density-matched random graph)")
     ap.add_argument("--gpu",          type=int,   default=0)
     ap.add_argument("--seed",         type=int,   default=42)
+    ap.add_argument("--split_tag",    default="",
+                    help="Tag suffix for data/model/output dirs (e.g. 'train' → data_train/, "
+                         "models_train/, outputs_train/). Empty = default dirs.")
     args = ap.parse_args()
+
+    # Apply split_tag: only changes MODEL_DIR and OUTPUT_DIR (not DATA_DIR).
+    # Training data is always from the default GAIA data dir.
+    # Use split_tag to name ablation runs, e.g. --split_tag self_loop saves to
+    # graph/models_self_loop/ and graph/outputs_self_loop/.
+    if args.split_tag:
+        tag = f"_{args.split_tag}"
+        global OUTPUT_DIR, MODEL_DIR
+        OUTPUT_DIR = BENCH_DIR / "graph" / f"outputs{tag}"
+        MODEL_DIR  = BENCH_DIR / "graph" / f"models{tag}"
 
     train(args)
 

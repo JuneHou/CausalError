@@ -132,4 +132,20 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Assemble graph_input.pt from prototypes + Suppes graph")
+    ap.add_argument("--data_dir", default=None,
+                    help="Data directory for prototypes.pt input and graph_input.pt output "
+                         "(default: graph/data/)")
+    ap.add_argument("--graph_data_dir", default=None,
+                    help="Directory containing graph_data.json (default: graph/outputs/)")
+    _args = ap.parse_args()
+    if _args.data_dir is not None:
+        _d = Path(_args.data_dir)
+        PROTO_FILE  = _d / "prototypes.pt"
+        LABEL_MAP   = _d / "label_to_node_idx.json"
+        OUTPUT_DIR  = _d
+        OUTPUT_FILE = _d / "graph_input.pt"
+    if _args.graph_data_dir is not None:
+        GRAPH_DATA = Path(_args.graph_data_dir) / "graph_data.json"
     main()

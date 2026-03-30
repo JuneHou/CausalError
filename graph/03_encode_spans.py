@@ -137,7 +137,21 @@ def main() -> None:
     ap.add_argument("--gpus", default=DEFAULT_GPUS,
                     help=f"Comma-separated GPU ids for DataParallel (default: {DEFAULT_GPUS}). "
                          "Use '' or 'cpu' to run on CPU.")
+    ap.add_argument("--data_file", default=None,
+                    help="Path to span_dataset.jsonl (default: graph/data/span_dataset.jsonl). "
+                         "Use to encode a different dataset, e.g. graph/data_swe/span_dataset.jsonl.")
+    ap.add_argument("--out_dir", default=None,
+                    help="Output directory for embeddings and prototypes "
+                         "(default: graph/data/). Must contain node_list.json or "
+                         "use --node_list to specify it separately.")
     args = ap.parse_args()
+
+    # Override paths if specified
+    global DATA_FILE, OUTPUT_DIR
+    if args.data_file:
+        DATA_FILE = Path(args.data_file)
+    if args.out_dir:
+        OUTPUT_DIR = Path(args.out_dir)
 
     # Parse GPU list
     if args.gpus.strip().lower() in ("", "cpu") or not torch.cuda.is_available():

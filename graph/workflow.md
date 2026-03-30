@@ -8,11 +8,15 @@
 
 ## Data Summary
 
-Currently trained and evaluated on **GAIA only** (SWE-bench excluded; uncomment in `01_make_splits.py` to include).
+Training and primary evaluation use **GAIA only**. SWE-bench is supported as a separate cross-dataset evaluation track via `--split_tag swe` (zero-shot transfer, not used for training).
 
-| Source | Traces | Spans |
-|---|---|---|
-| GAIA | 117 | 1,062 (9.1 avg/trace) |
+| Source | Traces | Spans | Use |
+|---|---|---|---|
+| GAIA | 117 | 1,062 (9.1 avg/trace) | Train / val / test |
+| SWE-bench | 31 | 484 (15.6 avg/trace) | Cross-dataset eval only (`graph/data_swe/`) |
+
+SWE-bench splits: 24 train / 2 val / 5 test (from `graph/splits_swe/`).
+See `graph/experiments.md` §5 for the full SWE-bench evaluation workflow and results.
 
 **19 error type nodes** (from `graph/outputs/graph_data.json`):
 ```

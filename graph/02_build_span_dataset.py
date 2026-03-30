@@ -362,11 +362,21 @@ def process_trace(trace_id: str, split: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    import argparse
+    ap = argparse.ArgumentParser(description="Build span dataset JSONL from trace annotations")
+    ap.add_argument("--splits_dir", default=None,
+                    help="Directory containing *_trace_ids.json (default: graph/splits/)")
+    ap.add_argument("--out_file", default=None,
+                    help="Output JSONL path (default: graph/data/span_dataset.jsonl)")
+    args = ap.parse_args()
+
+    splits_dir  = Path(args.splits_dir) if args.splits_dir else SPLITS_DIR
+    output_file = Path(args.out_file)   if args.out_file   else OUTPUT_FILE
+    output_file.parent.mkdir(parents=True, exist_ok=True)
 
     splits: dict[str, str] = {}
     for name in ("train", "val", "test"):
-        p = SPLITS_DIR / f"{name}_trace_ids.json"
+        p = splits_dir / f"{name}_trace_ids.json"
         if not p.exists():
             raise FileNotFoundError(f"{p} not found — run 01_make_splits.py first")
         for tid in _load_json(p):
@@ -392,7 +402,7 @@ def main() -> None:
         ann_total_total   += r.pop("_ann_total")
         records.append(r)
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
@@ -431,7 +441,7 @@ def main() -> None:
         avg = d["spans"] / max(d["traces"], 1)
         print(f"  {sn:<8}  {d['traces']:>7}  {d['spans']:>7}  {avg:>9.1f}  {d['annotated']:>9}")
 
-    print(f"\nOutput: {OUTPUT_FILE}")
+    print(f"\nOutput: {output_file}")
 
 
 if __name__ == "__main__":

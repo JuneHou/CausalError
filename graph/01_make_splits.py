@@ -37,6 +37,12 @@ ANNOTATION_DIRS = [
     # "processed_annotations_swe_bench",  # excluded: train/eval GAIA only for now
 ]
 
+# Dataset → annotation directory mapping (for --datasets CLI arg)
+_DATASET_DIRS = {
+    "gaia":      "processed_annotations_gaia",
+    "swe_bench": "processed_annotations_swe_bench",
+}
+
 # Types with ≤ RARE_THRESHOLD total traces → 1 forced to test, rest forced to train.
 # Setting to 4 captures: Service Errors (2), Timeout Issues (2),
 # Tool Definition Issues (3), Resource Exhaustion (3).
@@ -176,9 +182,15 @@ def select_forced(
 # Main split logic
 # ---------------------------------------------------------------------------
 
-def make_splits(base_dir: str = ".") -> None:
+def make_splits(
+    base_dir: str = ".",
+    train_ratio: float = TRAIN_RATIO,
+    val_ratio: float = VAL_RATIO,
+    out_dir: Path = OUTPUT_DIR,
+    relax: bool = False,
+) -> None:
     random.seed(SEED)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading annotations...")
     trace_to_errors = load_annotations(base_dir)
@@ -186,8 +198,8 @@ def make_splits(base_dir: str = ".") -> None:
 
     all_trace_ids  = sorted(trace_to_errors.keys())
     n_total        = len(all_trace_ids)
-    n_train_target = round(n_total * TRAIN_RATIO)
-    n_val_target   = round(n_total * VAL_RATIO)
+    n_train_target = round(n_total * train_ratio)
+    n_val_target   = round(n_total * val_ratio)
     n_test_target  = n_total - n_train_target - n_val_target
 
     print(f"\nTotal traces: {n_total}")
@@ -256,8 +268,13 @@ def make_splits(base_dir: str = ".") -> None:
                 print(f"  [WARNING] {et}: no test trace available (only {len(type_to_traces[et])} total)")
 
     # Final assertions
-    assert not (set(type_to_traces.keys()) - {c for t in train_ids for c in trace_to_errors[t]}), \
-        "Train still missing some error types"
+    missing_from_train = set(type_to_traces.keys()) - {c for t in train_ids for c in trace_to_errors[t]}
+    if missing_from_train:
+        msg = f"Train missing error types (only 1 trace total, forced to test): {sorted(missing_from_train)}"
+        if relax:
+            print(f"  [WARNING] {msg}")
+        else:
+            assert False, msg
     assert len(train_ids) + len(val_ids) + len(test_ids) == n_total, "Split sizes don't sum"
     assert not (set(train_ids) & set(val_ids)),  "Train/val overlap"
     assert not (set(train_ids) & set(test_ids)), "Train/test overlap"
@@ -284,9 +301,9 @@ def make_splits(base_dir: str = ".") -> None:
         print(f"  {et:<40} {n_to:>5}  {n_tr:>5}  {n_va:>5}  {n_te:>5}{warn}")
 
     # Save
-    out_train = OUTPUT_DIR / "train_trace_ids.json"
-    out_val   = OUTPUT_DIR / "val_trace_ids.json"
-    out_test  = OUTPUT_DIR / "test_trace_ids.json"
+    out_train = out_dir / "train_trace_ids.json"
+    out_val   = out_dir / "val_trace_ids.json"
+    out_test  = out_dir / "test_trace_ids.json"
 
     out_train.write_text(json.dumps(sorted(train_ids), indent=2))
     out_val.write_text(  json.dumps(sorted(val_ids),   indent=2))
@@ -303,5 +320,27 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Split TRAIL traces into train/val/test")
     ap.add_argument("--base_dir", default=str(_BENCH_DIR),
                     help="Directory containing processed_annotations_*/ (default: benchmarking/)")
+    ap.add_argument("--train_ratio", type=float, default=TRAIN_RATIO,
+                    help="Fraction of traces for train (default: %(default).2f)")
+    ap.add_argument("--val_ratio", type=float, default=VAL_RATIO,
+                    help="Fraction of traces for val (default: %(default).2f)")
+    ap.add_argument("--out_dir", default=None,
+                    help="Output directory for split JSON files (default: graph/splits/)")
+    ap.add_argument("--datasets", nargs="+", choices=list(_DATASET_DIRS.keys()),
+                    default=None,
+                    help="Which annotation datasets to include (default: gaia only). "
+                         "E.g. --datasets gaia swe_bench")
+    ap.add_argument("--relax", action="store_true",
+                    help="Downgrade 'train missing error types' from assertion to warning. "
+                         "Use for small datasets (e.g. SWE-bench) where single-occurrence "
+                         "types cannot appear in both train and test.")
     args = ap.parse_args()
-    make_splits(args.base_dir)
+
+    # Override ANNOTATION_DIRS if --datasets specified
+    if args.datasets:
+        ANNOTATION_DIRS[:] = [_DATASET_DIRS[d] for d in args.datasets]
+        print(f"Using annotation dirs: {ANNOTATION_DIRS}")
+
+    out_dir = Path(args.out_dir) if args.out_dir else OUTPUT_DIR
+    make_splits(args.base_dir, train_ratio=args.train_ratio, val_ratio=args.val_ratio,
+                out_dir=out_dir, relax=args.relax)
