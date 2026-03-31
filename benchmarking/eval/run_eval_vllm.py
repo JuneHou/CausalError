@@ -13,7 +13,10 @@ and can be scored with the standard calculate_scores.py.
 """
 
 import os
+import sys
 import glob
+import json
+import re
 import argparse
 from pathlib import Path
 from tqdm import tqdm
@@ -22,9 +25,48 @@ from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
 BENCH_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BENCH_DIR))
+from span_level_parser import parse_trace_to_step_level, _span_name
 
 
-def get_prompt(trace: str) -> str:
+def build_span_index(trace_str: str) -> str:
+    """Build a compact span index using only agent-step spans (CodeAgent.run,
+    ToolCallingAgent.run, Step N) plus their direct LLM/TOOL children — the spans
+    where TRAIL annotations actually live. Avg ~8.38 step spans per GAIA trace.
+    Does NOT recursively enumerate all spans (which would give ~30 irrelevant entries).
+    """
+    try:
+        trace_data = json.loads(trace_str)
+    except Exception:
+        return ""
+
+    parsed = parse_trace_to_step_level(trace_data)
+    span_by_id = parsed.get("span_by_id", {})
+    step_spans = parsed.get("step_spans", [])
+
+    if not step_spans:
+        return ""
+
+    lines = ["Span index for this trace (use these exact span_id hex values for the location field):"]
+    seen = set()
+    for entry in step_spans:
+        span = entry["span"]
+        sid = span.get("span_id")
+        sname = _span_name(span)
+        if sid and sid not in seen:
+            seen.add(sid)
+            lines.append(f'  span_id "{sid}"  ({sname})')
+        # Also include direct children (LiteLLMModel.__call__, TOOL spans) — annotation targets
+        for child in span.get("child_spans") or []:
+            csid = child.get("span_id")
+            csname = _span_name(child)
+            if csid and csid not in seen:
+                seen.add(csid)
+                lines.append(f'    span_id "{csid}"  ({csname})')
+    return "\n".join(lines)
+
+
+def get_prompt(trace: str, span_index: str = "") -> str:
     prompt = """Follow the taxonomy below carefully follow the instructions and provide the output in the same format as the example.
 
 # Taxonomy
@@ -140,13 +182,14 @@ If the trace has no errors, the output should be:
 
 The data to analyze is as follows:
 
-{trace}
+{span_index_block}{trace}
 
 - Ensure that the output is strictly in the correct JSON format and does not contain any other text or markdown formatting like ```json.
 - Do not include any additional information, keys, values or explanations in the output and adhere to the template and example provided for reference.
 - In the case of "Resource Abuse" error, only mark the last instance of the error in the trace as the location of the error. For all other errors, you must mark the first instance of the error in the trace as the location of the error.
 """
-    return prompt.format(trace=trace)
+    span_index_block = (span_index + "\n\n") if span_index else ""
+    return prompt.format(span_index_block=span_index_block, trace=trace)
 
 
 def main():
@@ -163,10 +206,13 @@ def main():
     parser.add_argument("--max_new_tokens",         type=int, default=8000)
     parser.add_argument("--enforce_eager",          action="store_true", default=True)
     parser.add_argument("--no_enforce_eager",       dest="enforce_eager", action="store_false")
+    parser.add_argument("--span_index",             action="store_true", default=False,
+                        help="Prepend a compact span_id→span_name index to each prompt (Exp 2A)")
     args = parser.parse_args()
 
     model_tag = args.model.replace("/", "-")
-    out_dir = os.path.join(args.output_dir, f"outputs_{model_tag}-{args.split}")
+    suffix = "_span_index" if args.span_index else ""
+    out_dir = os.path.join(args.output_dir, f"outputs_{model_tag}-{args.split}{suffix}")
     os.makedirs(out_dir, exist_ok=True)
 
     data_dir = os.path.join(args.data_dir, args.split)
@@ -199,7 +245,8 @@ def main():
         with open(fp) as f:
             trace = f.read()
 
-        messages = [{"role": "user", "content": get_prompt(trace)}]
+        span_idx = build_span_index(trace) if args.span_index else ""
+        messages = [{"role": "user", "content": get_prompt(trace, span_index=span_idx)}]
         prompt_text = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )

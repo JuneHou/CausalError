@@ -20,6 +20,7 @@ Output:
 """
 
 import os
+import sys
 import re
 import json
 import glob
@@ -38,6 +39,8 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 REPO_ROOT   = Path(__file__).resolve().parent.parent
 BENCH_DIR   = REPO_ROOT / "benchmarking"
+sys.path.insert(0, str(BENCH_DIR))
+from span_level_parser import parse_trace_to_step_level, _span_name
 GRAPH_INPUT = REPO_ROOT / "graph" / "data" / "graph_input.pt"
 MODEL_ID    = "Tongyi-Zhiwen/QwenLong-L1-32B"
 
@@ -176,7 +179,37 @@ If the trace has no errors output {"errors": [], "scores": [{...}]}.
 - For "Resource Abuse" mark the last instance; for all others mark the first instance."""
 
 
-def build_pass1_prompt(trace_str: str) -> str:
+def build_span_index(trace_str: str) -> str:
+    """Compact span_id → span_name index using agent-step spans + their direct children.
+    Avg ~8 step spans per GAIA trace. Does NOT enumerate all recursive spans."""
+    try:
+        trace_data = json.loads(trace_str)
+    except Exception:
+        return ""
+    parsed = parse_trace_to_step_level(trace_data)
+    step_spans = parsed.get("step_spans", [])
+    if not step_spans:
+        return ""
+    lines = ["Span index for this trace (use these exact span_id hex values for the location field):"]
+    seen = set()
+    for entry in step_spans:
+        span = entry["span"]
+        sid = span.get("span_id")
+        sname = _span_name(span)
+        if sid and sid not in seen:
+            seen.add(sid)
+            lines.append(f'  span_id "{sid}"  ({sname})')
+        for child in span.get("child_spans") or []:
+            csid = child.get("span_id")
+            csname = _span_name(child)
+            if csid and csid not in seen:
+                seen.add(csid)
+                lines.append(f'    span_id "{csid}"  ({csname})')
+    return "\n".join(lines)
+
+
+def build_pass1_prompt(trace_str: str, span_index: str = "") -> str:
+    span_block = (span_index + "\n\n") if span_index else ""
     return (
         TAXONOMY_BLOCK
         + "\n\n"
@@ -185,6 +218,7 @@ def build_pass1_prompt(trace_str: str) -> str:
         + "- You must provide the output strictly in JSON format as shown below (do not wrap in markdown, output only JSON).\n\n"
         + OUTPUT_TEMPLATE
         + "\n\nThe data to analyze is as follows:\n\n"
+        + span_block
         + trace_str
     )
 
@@ -425,6 +459,7 @@ def run_pipeline(
     max_new_tokens: int,
     validate_span_id: bool = True,
     repair_location: bool = False,
+    span_index: str = "",
 ) -> dict:
     """Run two-pass UQ pipeline on a single trace. Returns final JSON dict."""
 
@@ -451,7 +486,7 @@ def run_pipeline(
         return len(tokenizer.encode(text, add_special_tokens=False))
 
     # --- Pass 1 ---
-    p1_text     = format_prompt(build_pass1_prompt(trace_str))
+    p1_text     = format_prompt(build_pass1_prompt(trace_str, span_index=span_index))
     p1_tok_len  = prompt_token_len(p1_text)
     print(f"  [Pass 1] prompt tokens: {p1_tok_len:,}  (model limit: {sp_with_lp.max_tokens} output, {131072} context)")
 
@@ -605,16 +640,19 @@ def main() -> None:
     parser.add_argument("--causal_only",            action="store_true",
                         help="Use only the ~11 fully validated causal edges")
     parser.add_argument("--graph_input",            type=str,   default=None)
+    parser.add_argument("--span_index",             action="store_true", default=False,
+                        help="Prepend agent-step span_id index to each Pass 1 prompt (Exp 2A-UQ)")
     args = parser.parse_args()
 
     # --- Paths ---
     data_dir = Path(args.data_dir) if args.data_dir else BENCH_DIR / "data" / args.split
     model_tag = args.model.split("/")[-1]
     graph_tag = "causal_only" if args.causal_only else f"suppes_t{args.edge_threshold}"
+    span_tag  = "_span_index" if args.span_index else ""
     out_dir = (
         Path(args.output_dir)
         if args.output_dir
-        else REPO_ROOT / "UQ" / "outputs" / f"outputs_{model_tag}-{args.split}-uq_{graph_tag}"
+        else REPO_ROOT / "UQ" / "outputs" / f"outputs_{model_tag}-{args.split}-uq_{graph_tag}{span_tag}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -660,7 +698,8 @@ def main() -> None:
         if out_file.exists():
             continue  # resume
 
-        trace_str = load_trace(fp)
+        trace_str  = load_trace(fp)
+        span_idx   = build_span_index(trace_str) if args.span_index else ""
         try:
             result = run_pipeline(
                 llm                  = llm,
@@ -671,6 +710,7 @@ def main() -> None:
                 max_new_tokens       = args.max_new_tokens,
                 validate_span_id     = args.validate_span_id,
                 repair_location      = args.repair_location,
+                span_index           = span_idx,
             )
         except Exception as e:
             print(f"\nError on {fp}: {e}")
