@@ -26,8 +26,14 @@ import json
 import glob
 import math
 import argparse
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Suppress HuggingFace "Token indices sequence length > model_max_length" warning.
+# The tokenizer config has model_max_length=16384 but vLLM uses max_model_len=131072.
+# This warning fires from the transformers logging system (not Python warnings module).
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 import torch
 from vllm import LLM, SamplingParams
@@ -74,9 +80,17 @@ TAXONOMY_CATEGORIES = [
 def load_suppes_edges(
     threshold: float,
     causal_only: bool = False,
+    corr_threshold: float = 1.0,
     graph_input: Path = GRAPH_INPUT,
 ) -> List[Tuple[str, str, float]]:
-    """Return list of (src_name, dst_name, weight) edges from graph_input.pt."""
+    """Return list of (src_name, dst_name, weight) edges from graph_input.pt.
+
+    Selection logic:
+      causal_only=True            : only the ~11 bootstrap-validated causal edges (w=1.0)
+      corr_threshold < 1.0        : causal edges PLUS correlation edges with w >= corr_threshold
+                                    (Exp 3A extended graph; recommended: corr_threshold=0.20)
+      otherwise (default)         : all edges with w >= threshold
+    """
     gi             = torch.load(graph_input, weights_only=False)
     node_names     = gi["node_names"]
     edge_index     = gi["edge_index"]
@@ -91,9 +105,13 @@ def load_suppes_edges(
         w   = edge_weight[i].item()
         if src == correct_idx or dst == correct_idx:
             continue
+        is_causal = (edge_is_causal[i].item() == 1.0) if edge_is_causal is not None else (w == 1.0)
         if causal_only:
-            is_causal = (edge_is_causal[i].item() == 1.0) if edge_is_causal is not None else (w == 1.0)
             if not is_causal:
+                continue
+        elif corr_threshold < 1.0:
+            # Include all causal edges + correlation edges that clear the weight bar
+            if not is_causal and w < corr_threshold:
                 continue
         else:
             if w < threshold:
@@ -429,6 +447,310 @@ def validate_and_repair_locations(
     return cleaned, diagnostics
 
 
+def _apply_chat_template(tokenizer: "AutoTokenizer", user_text: str) -> str:
+    """Format a user message with the model's chat template."""
+    messages = [{"role": "user", "content": user_text}]
+    return tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+
+# ============================================================
+# EXPERIMENT 2C: Graph-guided targeted probing
+# Purpose: use causal graph to identify categories likely missed
+#          by Pass 1, then probe the trace for each with full
+#          context + span_index guidance.
+# To remove: delete this block + the === EXP 2C === sections
+#            in run_pipeline, argparse, and output dir naming.
+# ============================================================
+
+GRAPH_PROBE_TEMPLATE_IMPLICIT = """\
+{taxonomy_block}
+
+You are performing a targeted verification for a specific error type in an LLM agent trace.
+
+Context: A causally related error was already detected in this trace. Based on statistical
+causal relationships between error types, a "{category}" error is likely also present.
+
+Your task: Determine whether a "{category}" error exists in the trace below.
+
+{span_index_block}\
+- Output ONLY valid JSON. No markdown, no extra text.
+- If the error IS present:
+  {{"present": true, "location": "<span_id_hex>", "evidence": "...", "description": "...", "impact": "HIGH|MEDIUM|LOW"}}
+- If the error is NOT present:
+  {{"present": false}}
+
+The trace:
+
+{trace}"""
+
+GRAPH_PROBE_TEMPLATE_EXPLICIT = """\
+{taxonomy_block}
+
+You are performing a targeted verification for a specific error type in an LLM agent trace.
+
+Causal graph analysis: "{source_category}" was detected in this trace (at span {source_span}).
+Statistical analysis of agent execution traces shows "{source_category}" causally precedes
+"{category}" in a bootstrap-validated causal graph (Suppes criterion, edge weight={weight:.2f}).
+Based on this causal relationship, a "{category}" error is likely also present in this trace.
+
+Your task: Determine whether a "{category}" error exists in the trace below.
+
+{span_index_block}\
+- Output ONLY valid JSON. No markdown, no extra text.
+- If the error IS present:
+  {{"present": true, "location": "<span_id_hex>", "evidence": "...", "description": "...", "impact": "HIGH|MEDIUM|LOW"}}
+- If the error is NOT present:
+  {{"present": false}}
+
+The trace:
+
+{trace}"""
+
+
+def build_graph_probe_prompt(
+    category: str,
+    trace_str: str,
+    span_index: str = "",
+    explicit_causal_encoding: bool = False,
+    source_category: str = "",
+    source_span: str = "",
+    weight: float = 0.0,
+) -> str:
+    span_index_block = (span_index + "\n\n") if span_index else ""
+    if explicit_causal_encoding and source_category:
+        return GRAPH_PROBE_TEMPLATE_EXPLICIT.format(
+            taxonomy_block=TAXONOMY_BLOCK,
+            category=category,
+            source_category=source_category,
+            source_span=source_span or "unknown",
+            weight=weight,
+            span_index_block=span_index_block,
+            trace=trace_str,
+        )
+    return GRAPH_PROBE_TEMPLATE_IMPLICIT.format(
+        taxonomy_block=TAXONOMY_BLOCK,
+        category=category,
+        span_index_block=span_index_block,
+        trace=trace_str,
+    )
+
+
+# ProbeTarget bundles everything run_graph_probing needs per category.
+# target: category to probe; source_category/source_span/weight for explicit encoding.
+from typing import NamedTuple
+
+class ProbeTarget(NamedTuple):
+    target:          str
+    source_category: str  = ""
+    source_span:     str  = ""
+    weight:          float = 0.0
+
+
+def run_graph_probing(
+    llm: LLM,
+    tokenizer: AutoTokenizer,
+    trace_str: str,
+    to_probe: List[ProbeTarget],
+    span_index: str,
+    max_new_tokens: int,
+    explicit_causal_encoding: bool = False,
+) -> Tuple[List[dict], dict]:
+    """
+    EXP 2C / 3A core: for each graph-propagated category not detected in Pass 1,
+    run a targeted probe on the full trace with span_index guidance.
+    One query per category (not per span) — model selects the span itself.
+
+    Returns (new_errors, probe_meta) where new_errors is a list of error dicts
+    to merge with Pass 1 output.
+    """
+    if not to_probe:
+        return [], {}
+
+    sp = SamplingParams(temperature=0.0, max_tokens=max_new_tokens)
+    prompts = [
+        _apply_chat_template(tokenizer, build_graph_probe_prompt(
+            category=pt.target,
+            trace_str=trace_str,
+            span_index=span_index,
+            explicit_causal_encoding=explicit_causal_encoding,
+            source_category=pt.source_category,
+            source_span=pt.source_span,
+            weight=pt.weight,
+        ))
+        for pt in to_probe
+    ]
+    outputs = llm.generate(prompts, sp)
+
+    new_errors: List[dict] = []
+    probe_meta: dict = {}
+    for pt, out in zip(to_probe, outputs):
+        cat = pt.target
+        raw = out.outputs[0].text
+        parsed = parse_json_output(raw)
+        if parsed is None:
+            print(f"  [probe] {cat}: parse failed")
+            probe_meta[cat] = {"present": None, "parse_failed": True}
+            continue
+        present = parsed.get("present", False)
+        probe_meta[cat] = {"present": present, "raw": raw[:300]}
+        if present:
+            loc = parsed.get("location", "")
+            if loc:
+                new_errors.append({
+                    "category":    cat,
+                    "location":    loc,
+                    "evidence":    parsed.get("evidence", ""),
+                    "description": parsed.get("description", ""),
+                    "impact":      parsed.get("impact", "MEDIUM"),
+                })
+                print(f"  [probe] {cat}: FOUND at {loc}")
+            else:
+                print(f"  [probe] {cat}: present=true but no location")
+        else:
+            print(f"  [probe] {cat}: not present")
+
+    return new_errors, probe_meta
+
+# ============================================================
+# END EXPERIMENT 2C
+# ============================================================
+
+
+# ============================================================
+# EXPERIMENT 4: Graph-Inject — filtered subgraph in one holistic Pass 2
+#
+# Replaces per-category graph_probe calls (N calls/trace) with a single
+# holistic second pass that shows the filtered correlation subgraph to the
+# model. The subgraph is built by keeping only edges whose source category
+# was detected in Pass 1. This gives the model graph context while keeping
+# API cost at exactly 1 extra call per trace regardless of graph size.
+#
+# To remove: delete this block + the === EXP 4 === sections in
+#            run_pipeline, argparse, and output dir naming.
+# ============================================================
+
+GRAPH_INJECT_TEMPLATE = """\
+{taxonomy_block}
+
+You are performing a TARGETED SECOND-PASS analysis of an LLM agent trace.
+
+PASS 1 RESULTS — The following errors were already detected:
+{pass1_summary}
+
+CAUSAL GRAPH CONTEXT — Statistical analysis of agent traces shows these error
+type relationships (source → target [edge weight]):
+{graph_text}
+
+Based on the causal graph above, look specifically for the TARGET error types
+listed — they are statistically likely given what was detected in Pass 1.
+
+{span_index_block}\
+INSTRUCTIONS:
+- Output ONLY errors not already found in Pass 1.
+- If no additional errors are present, output {{"errors": []}}.
+- Do NOT include scores.
+- Output strictly valid JSON: {{"errors": [...]}}
+- Use the same schema: category, location (exact span_id hex), evidence, description, impact.
+
+The trace to analyze:
+
+{trace}"""
+
+
+def build_graph_inject_prompt(
+    trace_str: str,
+    pass1_errors: List[dict],
+    filtered_edges: List[Tuple[str, str, float]],
+    span_index: str = "",
+) -> str:
+    pass1_summary = (
+        "\n".join(
+            f"  - {e['category']} at span {e.get('location', '?')}"
+            for e in pass1_errors
+        )
+        if pass1_errors else "  (none)"
+    )
+    graph_text = "\n".join(
+        f'  "{src}" → "{dst}"  [weight: {w:.2f}]'
+        for src, dst, w in filtered_edges
+    ) if filtered_edges else "  (no relevant edges)"
+    span_index_block = (span_index + "\n\n") if span_index else ""
+    return GRAPH_INJECT_TEMPLATE.format(
+        taxonomy_block=TAXONOMY_BLOCK,
+        pass1_summary=pass1_summary,
+        graph_text=graph_text,
+        span_index_block=span_index_block,
+        trace=trace_str,
+    )
+
+
+def run_graph_inject(
+    llm: LLM,
+    tokenizer: AutoTokenizer,
+    trace_str: str,
+    pass1_errors: List[dict],
+    edges: List[Tuple[str, str, float]],
+    detected_cats: List[str],
+    span_index: str,
+    max_new_tokens: int,
+) -> Tuple[List[dict], dict]:
+    """
+    EXP 4: Build a filtered subgraph (edges where src ∈ detected_cats and
+    dst ∉ detected_cats), then run a single holistic second-pass LLM call
+    with the subgraph injected into the prompt.
+
+    Returns (new_errors, inject_meta).
+    """
+    detected_set = set(detected_cats)
+    filtered_edges = [
+        (src, dst, w)
+        for src, dst, w in edges
+        if src in detected_set and dst not in detected_set
+    ]
+
+    if not filtered_edges:
+        print("  [graph_inject] no relevant edges after filtering — skipping Pass 2")
+        return [], {"filtered_edges": 0, "skipped": True}
+
+    print(f"  [graph_inject] {len(filtered_edges)} filtered edges → single Pass 2 call")
+
+    prompt = _apply_chat_template(
+        tokenizer,
+        build_graph_inject_prompt(
+            trace_str=trace_str,
+            pass1_errors=pass1_errors,
+            filtered_edges=filtered_edges,
+            span_index=span_index,
+        ),
+    )
+    sp = SamplingParams(temperature=0.0, max_tokens=max_new_tokens)
+    out = llm.generate([prompt], sp)[0].outputs[0]
+    print(f"  [graph_inject] response tokens: {len(out.token_ids):,}  finish_reason: {out.finish_reason}")
+
+    parsed = parse_json_output(out.text)
+    new_errors: List[dict] = []
+    if parsed is None:
+        print(f"  [graph_inject] JSON parse FAILED. Raw (first 500):\n    {out.text[:500]!r}")
+    else:
+        new_errors = parsed.get("errors", [])
+        print(f"  [graph_inject] found {len(new_errors)} new errors")
+
+    inject_meta = {
+        "filtered_edges":   len(filtered_edges),
+        "edge_list":        [(s, d, round(w, 3)) for s, d, w in filtered_edges],
+        "p2_response_tokens": len(out.token_ids),
+        "p2_finish_reason": out.finish_reason,
+        "p2_raw_response":  out.text,
+    }
+    return new_errors, inject_meta
+
+# ============================================================
+# END EXPERIMENT 4
+# ============================================================
+
+
 def normalize_to_leaf(category: str) -> str:
     """Strip taxonomy path prefix, keeping only the leaf name.
 
@@ -460,13 +782,29 @@ def run_pipeline(
     validate_span_id: bool = True,
     repair_location: bool = False,
     span_index: str = "",
+    graph_probe: bool = False,
+    # === EXP 3A ===
+    explicit_causal_encoding: bool = False,
+    # === EXP 3B ===
+    consistency_confidence: bool = False,
+    # === EXP 4 ===
+    graph_inject: bool = False,
 ) -> dict:
-    """Run two-pass UQ pipeline on a single trace. Returns final JSON dict."""
+    """Run UQ pipeline on a single trace. Returns final JSON dict.
 
-    sp_with_lp = SamplingParams(
+    Confidence modes (mutually exclusive, checked in order):
+      consistency_confidence=True  : Exp 3B — run Pass 1 twice (T=0 + T=0.7),
+                                     assign conf 1.0/0.5/0.0 by cross-run agreement
+      graph_probe=True (default 2C): hard-binary conf (1.0 detected / 0.0 not)
+      graph_inject=True (Exp 4)    : hard-binary conf + single holistic Pass 2
+                                     with filtered subgraph injected in prompt
+      otherwise                    : label-token logprob (Exp 1)
+    """
+
+    sp_greedy = SamplingParams(
         temperature=0.0,
         max_tokens=max_new_tokens,
-        logprobs=1,         # return logprob of the sampled token at each position
+        logprobs=0 if (graph_probe or consistency_confidence or graph_inject) else 1,
         stop=None,
     )
     sp_no_lp = SamplingParams(
@@ -475,12 +813,7 @@ def run_pipeline(
     )
 
     def format_prompt(user_text: str) -> str:
-        messages = [{"role": "user", "content": user_text}]
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        return _apply_chat_template(tokenizer, user_text)
 
     def prompt_token_len(text: str) -> int:
         return len(tokenizer.encode(text, add_special_tokens=False))
@@ -488,9 +821,9 @@ def run_pipeline(
     # --- Pass 1 ---
     p1_text     = format_prompt(build_pass1_prompt(trace_str, span_index=span_index))
     p1_tok_len  = prompt_token_len(p1_text)
-    print(f"  [Pass 1] prompt tokens: {p1_tok_len:,}  (model limit: {sp_with_lp.max_tokens} output, {131072} context)")
+    print(f"  [Pass 1] prompt tokens: {p1_tok_len:,}  (model limit: {sp_greedy.max_tokens} output, {131072} context)")
 
-    p1_out  = llm.generate([p1_text], sp_with_lp)[0].outputs[0]
+    p1_out  = llm.generate([p1_text], sp_greedy)[0].outputs[0]
     print(f"  [Pass 1] response tokens: {len(p1_out.token_ids):,}  finish_reason: {p1_out.finish_reason}")
 
     p1_parsed = parse_json_output(p1_out.text)
@@ -532,22 +865,69 @@ def run_pipeline(
 
     detected_cats = list({e["category"] for e in p1_errors if e.get("category")})
 
-    # --- Confidence extraction ---
-    conf = extract_category_confidence(
-        output_text   = p1_out.text,
-        token_logprobs = p1_out.logprobs or [],
-        detected_categories = detected_cats,
-    )
+    # --- Confidence for graph propagation ---
+    if consistency_confidence:
+        # === EXP 3B: 2-sample consistency confidence ===
+        # Run Pass 1 a second time at T=0.7 and use cross-run agreement as the signal.
+        # conf=1.0 (both runs agree), 0.5 (only one run), 0.0 (neither).
+        sp_sampled = SamplingParams(temperature=0.7, max_tokens=max_new_tokens)
+        p1b_out    = llm.generate([p1_text], sp_sampled)[0].outputs[0]
+        p1b_parsed = parse_json_output(p1b_out.text)
+        if p1b_parsed:
+            p1b_errors = p1b_parsed.get("errors", [])
+            for e in p1b_errors:
+                if e.get("category"):
+                    e["category"] = normalize_to_leaf(e["category"])
+            detected_cats_sampled = {e["category"] for e in p1b_errors if e.get("category")}
+        else:
+            print("  [3B] T=0.7 pass JSON parse failed; falling back to hard-binary")
+            detected_cats_sampled = set()
+        detected_cats_greedy = set(detected_cats)
+        conf = {}
+        for cat in detected_cats_greedy | detected_cats_sampled:
+            if cat in detected_cats_greedy and cat in detected_cats_sampled:
+                conf[cat] = 1.0
+            else:
+                conf[cat] = 0.5
+        print(f"  [3B] T=0.7 detected: {sorted(detected_cats_sampled)}")
+    elif graph_probe or graph_inject:
+        # === EXP 2C / EXP 4: hard-binary conf (1.0/0.0) ===
+        conf = {cat: 1.0 for cat in detected_cats}
+    else:
+        conf = extract_category_confidence(
+            output_text        = p1_out.text,
+            token_logprobs     = p1_out.logprobs or [],
+            detected_categories= detected_cats,
+        )
 
     # --- Causal propagation ---
     boosted = propagate_confidence(conf, edges, TAXONOMY_CATEGORIES)
 
-    # --- Identify categories to verify in Pass 2 ---
+    # --- Identify categories to probe and build source info for explicit encoding ---
     detected_set = set(detected_cats)
-    to_verify = [
+    to_verify_cats = [
         cat for cat in TAXONOMY_CATEGORIES
         if cat not in detected_set and boosted.get(cat, 0.0) > propagation_threshold
     ]
+
+    # For each probe target, find the strongest triggering source edge so the
+    # explicit encoding template can name it.
+    to_verify: List[ProbeTarget] = []
+    for target in to_verify_cats:
+        candidates = [
+            (src, w)
+            for src, dst, w in edges
+            if dst == target and conf.get(src, 0.0) > 0
+        ]
+        if candidates:
+            best_src, best_w = max(candidates, key=lambda x: conf.get(x[0], 0.0) * x[1])
+            src_span = next(
+                (e.get("location", "") for e in p1_errors if e.get("category") == best_src),
+                "",
+            )
+        else:
+            best_src, best_w, src_span = "", 0.0, ""
+        to_verify.append(ProbeTarget(target, best_src, src_span, best_w))
 
     print(f"  [Pass 1] detected {len(p1_errors)} errors: {detected_cats}")
     print(f"  [Conf]   {', '.join(f'{k}: {v:.3f}' for k, v in conf.items()) or '(none)'}")
@@ -563,28 +943,57 @@ def run_pipeline(
         "pass1_raw_response":    p1_out.text,
         "confidence":            {k: round(v, 4) for k, v in conf.items()},
         "boosted_scores":        {k: round(v, 4) for k, v in boosted.items() if v > 0},
-        "pass2_verify":          to_verify,
+        "to_verify":             [pt.target for pt in to_verify],
         "propagation_threshold": propagation_threshold,
     }
 
     p2_errors: List[dict] = []
     if to_verify:
-        # --- Pass 2 ---
-        p2_text    = format_prompt(build_pass2_prompt(trace_str, p1_errors, to_verify))
-        p2_tok_len = prompt_token_len(p2_text)
-        print(f"  [Pass 2] triggered for: {to_verify}")
-        print(f"  [Pass 2] prompt tokens: {p2_tok_len:,}")
-        p2_out  = llm.generate([p2_text], sp_no_lp)[0].outputs[0]
-        print(f"  [Pass 2] response tokens: {len(p2_out.token_ids):,}  finish_reason: {p2_out.finish_reason}")
-        p2_parsed = parse_json_output(p2_out.text)
-        if p2_parsed is None:
-            print(f"  [Pass 2] JSON parse FAILED. Raw response (first 500 chars):\n    {p2_out.text[:500]!r}")
-        if p2_parsed:
-            p2_errors = p2_parsed.get("errors", [])
-        uq_meta["pass2_prompt_tokens"]   = p2_tok_len
-        uq_meta["pass2_response_tokens"] = len(p2_out.token_ids)
-        uq_meta["pass2_finish_reason"]   = p2_out.finish_reason
-        uq_meta["pass2_raw_response"]    = p2_out.text
+        if graph_inject:
+            # === EXP 4: single holistic Pass 2 with filtered subgraph ===
+            p2_errors, inject_meta = run_graph_inject(
+                llm=llm, tokenizer=tokenizer,
+                trace_str=trace_str, pass1_errors=p1_errors,
+                edges=edges, detected_cats=detected_cats,
+                span_index=span_index, max_new_tokens=max_new_tokens,
+            )
+            uq_meta["graph_inject_meta"] = inject_meta
+        elif graph_probe or consistency_confidence:
+            print(f"  [probe] Graph-triggered categories: {[pt.target for pt in to_verify]}")
+            p2_errors, probe_meta = run_graph_probing(
+                llm=llm, tokenizer=tokenizer,
+                trace_str=trace_str, to_probe=to_verify,
+                span_index=span_index, max_new_tokens=max_new_tokens,
+                explicit_causal_encoding=explicit_causal_encoding,
+            )
+            uq_meta["graph_probe_meta"] = probe_meta
+        else:
+            # --- Original Pass 2 (holistic re-verification) ---
+            p2_text    = format_prompt(build_pass2_prompt(trace_str, p1_errors, to_verify))
+            p2_tok_len = prompt_token_len(p2_text)
+            print(f"  [Pass 2] triggered for: {to_verify}")
+            print(f"  [Pass 2] prompt tokens: {p2_tok_len:,}")
+            p2_out  = llm.generate([p2_text], sp_no_lp)[0].outputs[0]
+            print(f"  [Pass 2] response tokens: {len(p2_out.token_ids):,}  finish_reason: {p2_out.finish_reason}")
+            p2_parsed = parse_json_output(p2_out.text)
+            if p2_parsed is None:
+                print(f"  [Pass 2] JSON parse FAILED. Raw (first 500):\n    {p2_out.text[:500]!r}")
+            if p2_parsed:
+                p2_errors = p2_parsed.get("errors", [])
+            uq_meta["pass2_prompt_tokens"]   = p2_tok_len
+            uq_meta["pass2_response_tokens"] = len(p2_out.token_ids)
+            uq_meta["pass2_finish_reason"]   = p2_out.finish_reason
+            uq_meta["pass2_raw_response"]    = p2_out.text
+
+    # --- Validate 2C/Pass-2 errors before merge ---
+    if p2_errors and validate_span_id:
+        valid_span_ids = extract_span_ids(trace_str)
+        p2_errors, p2_loc_diag = validate_and_repair_locations(
+            p2_errors, valid_span_ids, repair=repair_location
+        )
+        if p2_loc_diag["dropped_count"]:
+            print(f"  [Gate-p2] dropped {p2_loc_diag['dropped_count']} invalid span_ids from probe results")
+        uq_meta["p2_location_diagnostics"] = p2_loc_diag
 
     # --- Merge ---
     merged_errors = list(p1_errors)
@@ -638,21 +1047,49 @@ def main() -> None:
     parser.add_argument("--edge_threshold",         type=float, default=0.10,
                         help="Minimum Suppes edge weight to include in propagation")
     parser.add_argument("--causal_only",            action="store_true",
-                        help="Use only the ~11 fully validated causal edges")
+                        help="Use only the ~11 fully validated causal edges (Exp 1/2C)")
+    parser.add_argument("--corr_threshold",         type=float, default=1.0,
+                        help="(Exp 3A) Include causal edges + correlation edges with w >= this value. "
+                             "Set to 0.20 for the extended graph. Overrides --causal_only when < 1.0")
     parser.add_argument("--graph_input",            type=str,   default=None)
     parser.add_argument("--span_index",             action="store_true", default=False,
                         help="Prepend agent-step span_id index to each Pass 1 prompt (Exp 2A-UQ)")
+    parser.add_argument("--graph_probe",            action="store_true", default=False,
+                        help="(Exp 2C) Use hard-binary conf + targeted per-category graph probing "
+                             "instead of original Pass 2 holistic re-verification")
+    # === EXP 3A ===
+    parser.add_argument("--explicit_causal_encoding", action="store_true", default=False,
+                        help="(Exp 3A) Encode source category, span, and edge weight explicitly "
+                             "in each graph probe prompt instead of implicit 'causally related' framing")
+    # === EXP 3B ===
+    parser.add_argument("--consistency_confidence", action="store_true", default=False,
+                        help="(Exp 3B) Run Pass 1 twice (T=0 + T=0.7) and use cross-run category "
+                             "agreement as confidence: 1.0=both, 0.5=one, 0.0=neither")
+    # === EXP 4 ===
+    parser.add_argument("--graph_inject", action="store_true", default=False,
+                        help="(Exp 4) Hard-binary conf + single holistic Pass 2 with filtered "
+                             "subgraph injected in prompt (edges where src in detected_cats). "
+                             "Replaces per-category graph_probe calls with one call per trace.")
     args = parser.parse_args()
 
     # --- Paths ---
     data_dir = Path(args.data_dir) if args.data_dir else BENCH_DIR / "data" / args.split
-    model_tag = args.model.split("/")[-1]
-    graph_tag = "causal_only" if args.causal_only else f"suppes_t{args.edge_threshold}"
-    span_tag  = "_span_index" if args.span_index else ""
+    model_tag   = args.model.split("/")[-1]
+    if args.corr_threshold < 1.0:
+        graph_tag = f"causal_corr{args.corr_threshold}"
+    elif args.causal_only:
+        graph_tag = "causal_only"
+    else:
+        graph_tag = f"suppes_t{args.edge_threshold}"
+    span_tag    = "_span_index"           if args.span_index              else ""
+    probe_tag   = "_graph_probe"          if args.graph_probe             else ""
+    enc_tag     = "_explicit_enc"         if args.explicit_causal_encoding else ""
+    cons_tag    = "_consistency_conf"     if args.consistency_confidence  else ""
+    inject_tag  = "_graph_inject"         if args.graph_inject            else ""
     out_dir = (
         Path(args.output_dir)
         if args.output_dir
-        else REPO_ROOT / "UQ" / "outputs" / f"outputs_{model_tag}-{args.split}-uq_{graph_tag}{span_tag}"
+        else REPO_ROOT / "UQ" / "outputs" / f"outputs_{model_tag}-{args.split}-uq_{graph_tag}{span_tag}{probe_tag}{enc_tag}{cons_tag}{inject_tag}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -660,9 +1097,10 @@ def main() -> None:
     graph_input_path = Path(args.graph_input) if args.graph_input else GRAPH_INPUT
     print(f"Loading Suppes graph from {graph_input_path} ...")
     edges = load_suppes_edges(
-        threshold   = args.edge_threshold,
-        causal_only = args.causal_only,
-        graph_input = graph_input_path,
+        threshold      = args.edge_threshold,
+        causal_only    = args.causal_only and args.corr_threshold >= 1.0,
+        corr_threshold = args.corr_threshold,
+        graph_input    = graph_input_path,
     )
     print(f"  {len(edges)} edges loaded")
     for src, dst, w in edges[:5]:
@@ -673,6 +1111,10 @@ def main() -> None:
     # --- Load tokenizer ---
     print(f"\nLoading tokenizer for {args.model} ...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    # Suppress false "sequence longer than model_max_length" warnings —
+    # the tokenizer config has model_max_length=16384 but vLLM is configured
+    # with max_model_len=131072, which is the actual model context window.
+    tokenizer.model_max_length = args.max_model_len
 
     # --- Load vLLM model ---
     print(f"Loading model {args.model} with tensor_parallel_size={args.tensor_parallel_size} ...")
@@ -702,15 +1144,19 @@ def main() -> None:
         span_idx   = build_span_index(trace_str) if args.span_index else ""
         try:
             result = run_pipeline(
-                llm                  = llm,
-                tokenizer            = tokenizer,
-                trace_str            = trace_str,
-                edges                = edges,
-                propagation_threshold= args.propagation_threshold,
-                max_new_tokens       = args.max_new_tokens,
-                validate_span_id     = args.validate_span_id,
-                repair_location      = args.repair_location,
-                span_index           = span_idx,
+                llm                      = llm,
+                tokenizer                = tokenizer,
+                trace_str                = trace_str,
+                edges                    = edges,
+                propagation_threshold    = args.propagation_threshold,
+                max_new_tokens           = args.max_new_tokens,
+                validate_span_id         = args.validate_span_id,
+                repair_location          = args.repair_location,
+                span_index               = span_idx,
+                graph_probe              = args.graph_probe,
+                explicit_causal_encoding = args.explicit_causal_encoding,
+                consistency_confidence   = args.consistency_confidence,
+                graph_inject             = args.graph_inject,
             )
         except Exception as e:
             print(f"\nError on {fp}: {e}")

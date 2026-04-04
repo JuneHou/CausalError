@@ -224,14 +224,25 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
     print(f"Loading model {args.model} ...")
+    is_qwen3_1m = "Qwen3-30B-A3B" in args.model
+    if is_qwen3_1m:
+        import os as _os
+        _os.environ["VLLM_ATTENTION_BACKEND"] = "DUAL_CHUNK_FLASH_ATTN"
+        _os.environ["VLLM_USE_V1"] = "0"
+        print("Qwen3-30B-A3B detected: enabling DUAL_CHUNK_FLASH_ATTN, chunked prefill, max_num_seqs=1")
     llm = LLM(
-        model                 = args.model,
-        tensor_parallel_size  = args.tensor_parallel_size,
-        trust_remote_code     = True,
-        max_model_len         = args.max_model_len,
-        dtype                 = "bfloat16",
-        gpu_memory_utilization= args.gpu_memory_utilization,
-        enforce_eager         = args.enforce_eager,
+        model                  = args.model,
+        tensor_parallel_size   = args.tensor_parallel_size,
+        trust_remote_code      = True,
+        max_model_len          = args.max_model_len,
+        dtype                  = "bfloat16",
+        gpu_memory_utilization = args.gpu_memory_utilization,
+        enforce_eager          = args.enforce_eager,
+        **(dict(
+            enable_chunked_prefill   = True,
+            max_num_batched_tokens   = 131072,
+            max_num_seqs             = 1,
+        ) if is_qwen3_1m else {}),
     )
 
     sp = SamplingParams(temperature=0.0, max_tokens=args.max_new_tokens)

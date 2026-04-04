@@ -137,7 +137,7 @@ The data to analyze is as follows:
     return prompt.format(trace=trace)
 
 
-def call_litellm(trace: str, model: str = "openai/gpt-4o", api_base: str = None):
+def call_litellm(trace: str, model: str = "openai/gpt-4o"):
     prompt = get_prompt(trace)
 
     if (
@@ -165,12 +165,6 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o", api_base: str = None)
             "drop_params": True,
         }
 
-    if api_base:
-        params["api_base"] = api_base
-        dmx_key = os.environ.get("DMX_API_KEY")
-        if dmx_key:
-            params["api_key"] = dmx_key
-
     for attempt in range(3):
         try:
             response = completion(**params)
@@ -181,7 +175,7 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o", api_base: str = None)
     raise RateLimitError("Exceeded 3 retries due to rate limiting")
 
 
-def process_file(file_path, output_dir, model, api_base=None):
+def process_file(file_path, output_dir, model):
     output_file = f"{output_dir}/{file_path.split('/')[-1]}"
     if os.path.exists(output_file):
         return file_path  # already done, skip
@@ -190,7 +184,7 @@ def process_file(file_path, output_dir, model, api_base=None):
         trace = f.read()
 
     try:
-        response = call_litellm(trace=trace, model=model, api_base=api_base)
+        response = call_litellm(trace=trace, model=model)
     except ContextWindowExceededError as e:
         print(
             f"Context window excceded for trace: {file_path}: {e}. Creating empty output file."
@@ -214,12 +208,11 @@ def run_eval(
     output_dir: str = "output",
     model: str = "openai/gpt-4o",
     max_workers=1,
-    api_base: str = None,
 ):
     file_paths = glob.glob(f"{directory}/*.json")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(process_file, file_path, output_dir, model, api_base)
+            executor.submit(process_file, file_path, output_dir, model)
             for file_path in file_paths
         ]
         for future in tqdm(
@@ -260,13 +253,6 @@ def main():
         default="GAIA",
         help="Split of the dataset to evaluate (`GAIA` or `SWE Bench`)",
     )
-    parser.add_argument(
-        "--api_base",
-        type=str,
-        default=None,
-        help="Custom API base URL for OpenAI-compatible proxies (e.g. https://www.DMXapi.com/v1). "
-             "Set OPENAI_API_KEY in .env to your proxy key.",
-    )
     args = parser.parse_args()
     directory_containing_dataset = args.data_dir
 
@@ -280,7 +266,6 @@ def main():
         f"{args.output_dir}/outputs_{args.model.replace('/', '-')}-{args.split}",
         model=args.model,
         max_workers=args.max_workers,
-        api_base=args.api_base,
     )
 
 if __name__ == "__main__":
