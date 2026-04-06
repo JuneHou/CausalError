@@ -739,7 +739,7 @@ All three Round 3 directions failed to improve over Config 5. The 77 traces that
 |--------|------|---------|-------|-------|
 | Zero-shot | 0.154 | 0.071 | 0.020 | |
 | + Span index (2A) | 0.180 | 0.126 | 0.035 | |
-| + Graph probe (2C) | **0.206** | **0.135** | 0.024 | Current best |
+| + Graph probe (2C) | **0.206** | **0.135** | 0.024 | Best F1 |
 | + Explicit encoding (3A-enc) | 0.205 | 0.135 | 0.026 | Neutral |
 | + Consistency conf (3B) | 0.199 | 0.131 | 0.018 | Negative |
 | + Span re-rank (3C) | 0.206 | 0.127 | 0.019 | Negative (loc↓) |
@@ -747,3 +747,197 @@ All three Round 3 directions failed to improve over Config 5. The 77 traces that
 | Gemini zero-shot | 0.395 | 0.366 | 0.136 | Upper reference |
 
 **Bottleneck analysis**: The 40 overflow traces (34%) are a hard ceiling — those traces produce no output for any config. For the 77 processed traces, category detection (W-F1) appears near-ceiling for this model+graph combination. Location accuracy (0.135) remains the main gap vs Gemini (0.366), but re-ranking based on BM25+pointwise LLM scoring does not solve it because the ground-truth annotation scheme (always `LiteLLMModel.__call__` spans) is not recoverable from evidence text alone.
+
+---
+
+---
+
+## Experiment 4: Graph Inject — Single Holistic Pass 2 with Causal Subgraph ✓ COMPLETED 2026-04-04
+
+**Question**: Does injecting the detected-error causal subgraph into a single holistic Pass 2 prompt (vs. per-category graph probes in 2C) improve category recall and/or location accuracy?
+
+**Motivation**: Graph probe (2C) issues one small LLM call per propagated category. Each probe is highly focused but sees no cross-category context: the model cannot reason "if A and B are both present, then C is especially likely." A single holistic Pass 2 with the full filtered subgraph injected allows the model to see all causal relationships simultaneously and produce a richer set of new detections in one inference call — also at lower total LLM call cost when multiple categories are propagated.
+
+### Algorithm / Mechanism
+
+**Step 1 — Pass 1 (same as 2C)**: holistic error detection with span index injected.
+
+**Step 2 — Hard-binary confidence**: same as 2C (detected = 1.0, undetected = 0.0).
+
+**Step 3 — Causal graph propagation**: extended graph with correlation edges w≥0.20 (~26 edges from 9 source categories) instead of the causal-only 11-edge graph.
+```
+boosted_score(B) = Σ_{A→B} conf(A) × edge_weight(A→B)
+to_check = {B : boosted_score(B) > 0.10 AND B ∉ detected_cats}
+```
+
+**Step 4 — Filtered subgraph construction**: select only edges `src → dst` where `src ∈ detected_cats` AND `dst ∉ detected_cats` (exclude already-found categories from both endpoints).
+
+**Step 5 — Single holistic Pass 2** (the key difference from 2C):
+- Build one prompt that shows Pass 1 results + the full filtered subgraph with edge weights + span index + full trace
+- Ask the model to output ALL new errors at once:
+  ```
+  CAUSAL GRAPH CONTEXT:
+    "Tool Selection Errors" → "Goal Deviation"  [weight: 1.00]
+    "Tool Selection Errors" → "Language-only"   [weight: 0.32]
+    ...
+  Based on the causal graph above, look specifically for the TARGET error types.
+  Output ONLY errors not already found in Pass 1.
+  ```
+- One `llm.generate()` call regardless of how many propagated categories there are
+- Output schema: `{"errors": [...]}` with same fields as Pass 1
+
+**Key difference from 2C graph_probe**:
+
+| Dimension | 2C graph_probe | Exp 4 graph_inject |
+|-----------|---------------|-------------------|
+| Pass 2 calls per trace | 1 per propagated category | 1 total (all categories) |
+| Graph structure in prompt | Implicit ("causally related") | Explicit subgraph with weights |
+| Prompt focus | Single category per call | All graph-implied categories at once |
+| Cross-category reasoning | Not possible | Model sees all edges simultaneously |
+| Graph used | Causal-only (11 edges) | Extended corr0.2 (~26 edges) |
+
+### Run Command
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python UQ/run_uq_eval.py \
+    --split GAIA \
+    --tensor_parallel_size 2 \
+    --gpu_memory_utilization 0.75 \
+    --enforce_eager \
+    --corr_threshold 0.20 \
+    --validate_span_id \
+    --span_index \
+    --graph_inject \
+    --propagation_threshold 0.10
+```
+
+Output: `UQ/outputs/outputs_QwenLong-L1-32B-GAIA-uq_causal_corr0.2_span_index_graph_inject/`
+
+### Quantitative Results
+
+| Metric | Zero-Shot | + Span Index (2A) | Graph Probe (2C) | **Graph Inject (Exp 4)** |
+|--------|-----------|-------------------|------------------|--------------------------|
+| Weighted F1 | 0.154 | 0.180 | **0.206** | 0.1715 |
+| Location Accuracy | 0.071 | 0.126 | 0.135 | **0.1425** |
+| Location-Category Joint | 0.020 | 0.035 | 0.024 | 0.0256 |
+| Traces processed | 77 | 77 | 77 | 77 |
+
+**Summary**: Graph inject produces the best location accuracy seen so far (0.1425, +5.3% over graph_probe's 0.1353), but at the cost of lower F1 (0.1715 vs 0.2059, −16.7%). Joint accuracy (0.0256) is comparable to graph_probe (0.0244) — slightly better, consistent with the location improvement.
+
+### Per-Category F1
+
+| Category | Precision | Recall | F1 | Support |
+|----------|-----------|--------|----|---------|
+| Language-only | 0.4516 | 0.3500 | 0.3944 | 40 |
+| Tool Selection Errors | 0.5217 | 0.3243 | 0.4000 | 37 |
+| Goal Deviation | 0.8000 | 0.1935 | 0.3117 | 62 |
+| Instruction Non-compliance | 0.5000 | 0.1346 | 0.2121 | 52 |
+| Tool-related | 0.5000 | 0.1389 | 0.2174 | 36 |
+| Poor Information Retrieval | 0.1333 | 0.0952 | 0.1111 | 21 |
+| Resource Abuse | 0.2000 | 0.0345 | 0.0588 | 29 |
+| Environment Setup Errors | 0.5000 | 0.1111 | 0.1818 | 9 |
+| Formatting Errors | 0.0000 | 0.0000 | 0.0000 | 47 |
+| Task Orchestration | 0.0000 | 0.0000 | 0.0000 | 35 |
+| Context Handling Failures | 0.0000 | 0.0000 | 0.0000 | 21 |
+| Tool Output Misinterpretation | 0.0000 | 0.0000 | 0.0000 | 13 |
+| Incorrect Problem Identification | 0.0000 | 0.0000 | 0.0000 | 14 |
+
+**High-precision but low-recall pattern**: Goal Deviation (precision 0.80), Tool Selection Errors (0.52), Instruction Non-compliance (0.50) all have high precision but very low recall (~0.13–0.19). The graph inject Pass 2 is conservative — when it does confirm a category, it is often correct, but it misses many ground-truth instances. Formatting Errors, Task Orchestration, Context Handling Failures, Tool Output Misinterpretation are entirely undetected (zero F1 despite substantial support).
+
+### Operational Statistics
+
+| Stat | Value |
+|------|-------|
+| Traces processed | 77 / 117 (40 overflow) |
+| graph_inject triggered | 42 / 77 (54.5%) |
+| JSON parse failures | 8 / 42 (19%) |
+| Found 0 new errors | 9 traces |
+| Found 1 new error | 16 traces |
+| Found 2 new errors | 8 traces |
+| Found 3 new errors | 1 trace |
+| Edge counts per trigger | 1–9 edges (mode: 2) |
+
+**Trigger rate comparison**: graph_inject fires on 54.5% of traces (vs an estimated 20–30% for graph_probe on causal-only graph). This higher rate reflects the extended corr0.2 graph — correlation edges from Tool Selection, Language-only, and other common detections fire broadly.
+
+**19% JSON parse failure rate**: QwenLong-L1-32B prepends an extended `<think>` chain-of-thought before outputting JSON. For graph_inject, the prompt is larger (full trace + all graph edges), so the thinking block is longer and the model sometimes fails to emit valid JSON at the end. This is a systematic loss: 8 traces that triggered inject received no new errors due to parse failure alone.
+
+### Analysis
+
+**1. Location accuracy improves under holistic Pass 2 (+5.3% vs graph_probe).**
+The single holistic call re-reads the full trace with all causal context simultaneously. This gives the model a richer grounding for span assignment — it can cross-reference multiple error spans and the causal chain to pick more accurate locations. Per-category probes in 2C each see the trace independently; the holistic call sees the full picture.
+
+**2. F1 drops substantially (−16.7% vs graph_probe).**
+The holistic format is less effective at confirming individual new categories. Likely causes:
+- The model is presented with 1–9 candidate categories simultaneously; attention is diffuse
+- With the full taxonomy block in the prompt + all graph edges + full trace, the model's budget is consumed by reasoning rather than targeted detection
+- 19% parse failures add zero new categories for ~8 traces that would have benefited
+
+**3. Joint accuracy improves slightly (+0.012 absolute over graph_probe).**
+This is consistent with the location improvement: new errors that are detected (even at lower count) are more accurately placed.
+
+**4. Score correlations are weak (Pearson r ≤ 0.22).**
+Reliability correlation = 0.221 (marginal, p=0.057), all others essentially zero. The UQ-derived scores do not yet meaningfully track ground-truth quality.
+
+**5. Extended graph (corr0.2) effect not isolated.**
+The experiment combines two changes: (a) graph_inject vs graph_probe mechanism, and (b) extended corr0.2 graph vs causal_only. Cannot attribute the F1 drop solely to the mechanism change. Correlation edges (weight 0.20–0.38) may be firing on weak associations and adding noise to the holistic prompt.
+
+### Conclusion
+
+Graph inject's single-call design improves location accuracy to its best value yet (0.1425) but at significant F1 cost. The two mechanisms trade off differently: graph_probe maximizes F1 via focused per-category detection; graph_inject maximizes location via holistic context. Neither dominates on all metrics.
+
+---
+
+### Cumulative Results Table (All Experiments)
+
+| Config | W-F1 | Loc Acc | Joint | Notes |
+|--------|------|---------|-------|-------|
+| Zero-shot | 0.154 | 0.071 | 0.020 | |
+| UQ causal-only (Exp 1) | 0.137 | 0.044 | 0.013 | |
+| + Span index (2A) | 0.180 | 0.126 | 0.035 | |
+| UQ + span index (2A-UQ) | 0.165 | 0.135 | 0.027 | |
+| Graph probe (2C) | **0.206** | 0.135 | 0.024 | Best F1 |
+| Explicit encoding (3A-enc) | 0.205 | 0.135 | 0.026 | Neutral |
+| Consistency confidence (3B) | 0.199 | 0.131 | 0.018 | Negative |
+| Span re-rank (3C) | 0.206 | 0.127 | 0.019 | Negative (loc↓) |
+| **Graph inject (Exp 4)** | 0.172 | **0.143** | 0.026 | **Best Loc** |
+| Gemini zero-shot | 0.395 | 0.366 | 0.136 | Upper reference |
+
+---
+
+### Proposed Next Experiments (Round 4)
+
+Three directions derived from Exp 4 failure-mode analysis.
+
+**Direction A: Isolate graph extension effect — graph_inject + causal_only**
+
+Exp 4 conflates mechanism change (inject vs probe) with graph change (corr0.2 vs causal_only). Run graph_inject with `--causal_only` (11 edges) to check whether the extended corr0.2 graph is hurting F1 or is neutral.
+
+```bash
+python UQ/run_uq_eval.py \
+    --split GAIA \
+    --tensor_parallel_size 2 \
+    --gpu_memory_utilization 0.75 \
+    --enforce_eager \
+    --causal_only \
+    --validate_span_id \
+    --span_index \
+    --graph_inject \
+    --propagation_threshold 0.10
+```
+
+Expected output: `UQ/outputs/outputs_QwenLong-L1-32B-GAIA-uq_causal_only_span_index_graph_inject/`
+
+**Direction B: Fix JSON parse failures in graph_inject**
+
+19% parse failure rate (8/42 triggered traces) is a direct loss of new detections. Two prompt-level fixes to test:
+1. Strip the `{taxonomy_block}` from the graph_inject prompt — the model doesn't need the full 20-category taxonomy for a targeted Pass 2 (it already saw it in Pass 1). Shorter prompt → less thinking → better JSON compliance.
+2. Add a stricter instruction at the prompt end: `"CRITICAL: Your response must begin with { and contain ONLY valid JSON. No thinking, no explanation."` This directly addresses the chain-of-thought leakage pattern seen in failed parses.
+
+**Direction C: Hybrid graph_probe (F1) + graph_inject location refinement**
+
+The two mechanisms have complementary strengths: graph_probe maximizes F1 (0.206); graph_inject maximizes location (0.143). A hybrid approach:
+1. Run graph_probe to detect new categories (preserving F1=0.206)
+2. For each graph_probe detected error, run a lightweight graph_inject-style holistic call that sees both the probe result and the full causal context, and re-selects the location
+3. This decouples "which category" (graph_probe's strength) from "which span" (graph_inject's strength)
+
+This requires a new `--graph_inject_relocate` flag that post-processes graph_probe output with a location-focused holistic call.
