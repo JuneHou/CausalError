@@ -13,8 +13,25 @@ Special handling for llm.tools.N.json_schema:
   the largest single source of redundancy while keeping the information for
   Tool Definition Issues detection.
 
+Special handling for input.value on LLM spans:
+  For LLM spans, input.value is a JSON-string re-encoding of llm.input_messages.*,
+  which is already present in structured form. Dropping input.value from LLM spans
+  eliminates the largest remaining redundancy (~43 MB across GAIA, ~39% of total)
+  without losing any information.
+
+Optional --dedup mode (llm.input_messages deduplication):
+  Each LLM call in a trace receives the full accumulated conversation history.
+  Consecutive execution-step LLM spans share a growing prefix of messages (step N
+  contains all of step N-1's messages plus 2 new ones). With --dedup, spans after
+  the first share only their delta (new messages). The number of omitted prefix
+  messages is recorded as _messages_prefix_count in span_attributes so the full
+  conversation can always be reconstructed. Unrelated LLM calls (e.g. planning vs
+  execution, or sub-agent calls) have no common prefix and are left unchanged.
+  Output goes to <split>_dedup by default.
+
 Usage:
     python benchmarking/compress_traces.py --split GAIA
+    python benchmarking/compress_traces.py --split GAIA --dedup
     python benchmarking/compress_traces.py --split "SWE Bench"
     python benchmarking/compress_traces.py --split GAIA --input_dir path/to/data --output_dir path/to/out
     python benchmarking/compress_traces.py --split GAIA --dry_run   # stats only, no files written
@@ -40,7 +57,7 @@ TOP_LEVEL_DROP = {
     "scope_name",        # OTel instrumentation scope
     "scope_version",     # OTel instrumentation version
     "links",             # OTel span links, empty in TRAIL
-    "logs",              # always empty in TRAIL
+    "logs",              # function-call logs on UNKNOWN (Patronus wrapper) spans only; no agent-behavior signal
 }
 
 # span_attributes keys to drop (exact match)
@@ -79,11 +96,51 @@ def _is_extract_once(key: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# llm.input_messages deduplication helpers
+# ---------------------------------------------------------------------------
+
+def _extract_messages(attrs: dict) -> list:
+    """Parse llm.input_messages.N.message.{role,content} into an ordered list of dicts."""
+    msgs: dict = {}
+    for k, v in attrs.items():
+        if not k.startswith("llm.input_messages."):
+            continue
+        parts = k.split(".")
+        # expected: llm . input_messages . N . message . field
+        if len(parts) < 5:
+            continue
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            continue
+        field = parts[4]
+        if idx not in msgs:
+            msgs[idx] = {}
+        msgs[idx][field] = v
+    return [msgs[i] for i in sorted(msgs.keys())]
+
+
+def _common_prefix_len(a: list, b: list) -> int:
+    """Return the length of the longest common prefix between two message lists."""
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            return i
+    return n
+
+
+# ---------------------------------------------------------------------------
 # Core compression
 # ---------------------------------------------------------------------------
 
-def compress_span(span: dict, tool_schemas: dict) -> dict:
-    """Return a compressed copy of span. Mutates tool_schemas in-place."""
+def compress_span(span: dict, tool_schemas: dict, prev_llm_msgs: list) -> dict:
+    """Return a compressed copy of span.
+
+    tool_schemas  — mutable dict, accumulates hoisted tool JSON schemas.
+    prev_llm_msgs — mutable list (length-1 wrapper) holding the message list
+                    from the last LLM span seen in DFS order. Used for dedup.
+                    Pass an empty list [] to disable deduplication.
+    """
     out = {}
 
     for k, v in span.items():
@@ -97,6 +154,7 @@ def compress_span(span: dict, tool_schemas: dict) -> dict:
 
     # Process span_attributes
     attrs = span.get("span_attributes", {})
+    span_kind = attrs.get("openinference.span.kind", "")
     new_attrs = {}
     for k, v in attrs.items():
         if _should_drop_attr(k):
@@ -104,23 +162,58 @@ def compress_span(span: dict, tool_schemas: dict) -> dict:
         if _is_extract_once(k):
             tool_schemas[k] = v   # hoist to trace root
             continue
+        # input.value on LLM spans is a JSON-string re-encoding of llm.input_messages.*
+        # (already present in structured form) — drop to eliminate the largest redundancy.
+        if k == "input.value" and span_kind == "LLM":
+            continue
         new_attrs[k] = v
+
+    # Deduplicate llm.input_messages for LLM spans when dedup is enabled.
+    # prev_llm_msgs is used as a mutable length-1 list: [] = disabled, [[...]] = last msgs.
+    if span_kind == "LLM" and prev_llm_msgs:
+        curr_msgs = _extract_messages(attrs)
+        prefix_len = _common_prefix_len(prev_llm_msgs[0], curr_msgs)
+        if prefix_len > 0:
+            # Drop the shared-prefix keys from new_attrs.
+            for k in list(new_attrs.keys()):
+                if k.startswith("llm.input_messages."):
+                    parts = k.split(".")
+                    if len(parts) >= 3:
+                        try:
+                            if int(parts[2]) < prefix_len:
+                                del new_attrs[k]
+                        except ValueError:
+                            pass
+            # Record how many messages were omitted so reconstruction is possible.
+            new_attrs["_messages_prefix_count"] = prefix_len
+        # Update the shared state for the next LLM span in DFS order.
+        prev_llm_msgs[0] = curr_msgs
+    elif span_kind == "LLM" and prev_llm_msgs is not None and len(prev_llm_msgs) == 0:
+        # dedup enabled but this is the first LLM span — seed the state
+        curr_msgs = _extract_messages(attrs)
+        prev_llm_msgs.append(curr_msgs)
+
     if new_attrs:
         out["span_attributes"] = new_attrs
 
-    # Recurse into children
+    # Recurse into children (prev_llm_msgs is mutable, so DFS order is preserved).
     children = span.get("child_spans", [])
     if children:
-        out["child_spans"] = [compress_span(c, tool_schemas) for c in children]
+        out["child_spans"] = [compress_span(c, tool_schemas, prev_llm_msgs) for c in children]
 
     return out
 
 
-def compress_trace(trace_data: dict) -> dict:
-    """Return compressed trace. Tool schemas hoisted to root as _tool_schemas."""
+def compress_trace(trace_data: dict, dedup: bool = False) -> dict:
+    """Return compressed trace. Tool schemas hoisted to root as _tool_schemas.
+
+    dedup=True enables llm.input_messages prefix deduplication across LLM spans.
+    """
     tool_schemas: dict = {}
+    # prev_llm_msgs: [] means dedup disabled; starts empty and is seeded on first LLM span.
+    prev_llm_msgs: list = [] if dedup else None
     compressed_spans = [
-        compress_span(span, tool_schemas) for span in trace_data.get("spans", [])
+        compress_span(span, tool_schemas, prev_llm_msgs) for span in trace_data.get("spans", [])
     ]
     out = {
         "trace_id": trace_data["trace_id"],
@@ -150,16 +243,20 @@ def main():
     parser.add_argument("--input_dir", type=str, default=None,
                         help="Input directory (default: benchmarking/data/<split>)")
     parser.add_argument("--output_dir", type=str, default=None,
-                        help="Output directory (default: benchmarking/data/<split>_compressed)")
+                        help="Output directory (default: benchmarking/data/<split>_compressed or <split>_dedup with --dedup)")
     parser.add_argument("--dry_run", action="store_true",
                         help="Print stats only, do not write files")
+    parser.add_argument("--dedup", action="store_true",
+                        help="Also deduplicate llm.input_messages prefix across consecutive LLM spans. "
+                             "Records omitted count in _messages_prefix_count. Output goes to <split>_dedup.")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
     bench_dir = repo_root / "benchmarking"
 
     input_dir = Path(args.input_dir) if args.input_dir else bench_dir / "data" / args.split
-    output_dir = Path(args.output_dir) if args.output_dir else bench_dir / "data" / f"{args.split}_compressed"
+    default_suffix = "dedup" if args.dedup else "compressed"
+    output_dir = Path(args.output_dir) if args.output_dir else bench_dir / "data" / f"{args.split}_{default_suffix}"
 
     files = sorted(glob.glob(str(input_dir / "*.json")))
     if not files:
@@ -183,7 +280,7 @@ def main():
             trace_data = json.load(f)
 
         orig_bytes = os.path.getsize(path)
-        compressed = compress_trace(trace_data)
+        compressed = compress_trace(trace_data, dedup=args.dedup)
         comp_bytes = byte_size(compressed)
 
         total_orig += orig_bytes

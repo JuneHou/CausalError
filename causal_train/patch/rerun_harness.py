@@ -108,10 +108,22 @@ def _parse_tool_call_content(content: str) -> List[dict]:
     for tc in calls:
         fn = tc.get("function", {})
         args = fn.get("arguments", {})
+        tool_name = fn.get("name", "")
         if isinstance(args, dict):
             args_str = json.dumps(args)
         elif isinstance(args, str):
-            args_str = args
+            # python_interpreter (smolagents/SWE) stores raw Python code as the
+            # arguments string — wrap as {"code": ...} so Anthropic's API can
+            # parse it as JSON. Other tools (GAIA managed_agent etc.) pass
+            # their string args through unchanged.
+            if tool_name == "python_interpreter":
+                try:
+                    json.loads(args)
+                    args_str = args
+                except (json.JSONDecodeError, ValueError):
+                    args_str = json.dumps({"code": args})
+            else:
+                args_str = args
         else:
             args_str = "{}"
         result.append({
@@ -275,7 +287,9 @@ def _call_messages(
     Returns the assistant message dict (role, content, tool_calls if any).
     """
     try:
+        import litellm
         from litellm import completion, RateLimitError
+        litellm.modify_params = True
     except ImportError:
         raise RuntimeError("litellm not installed. pip install litellm")
 

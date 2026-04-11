@@ -1,19 +1,19 @@
 """
-eval/run_eval_with_graph.py — LLM-as-judge evaluation with Suppes causal graph guidance.
+eval/run_eval_with_graph.py — LLM-as-judge evaluation with causal graph guidance.
 
 Identical to run_eval.py except the prompt is augmented with a "Causal Error Patterns"
-section derived from the Suppes graph built by the graph/ pipeline.
+section derived from the causal graph JSON files (no torch/embeddings required).
 
-The causal graph encodes statistically-derived co-occurrence relationships:
-  A → B (weight w) means: in traces where A appears, B tends to follow causally.
-Only edges with weight >= EDGE_THRESHOLD are included to keep the prompt focused.
+Two graph sources (both plain JSON):
+  --causal_only  — 13 CAPRI-AIC validated edges from capri_graph.json (pr_delta as weight)
+  default        — all Suppes edges with pr_delta >= --edge_threshold from suppes_graph.json
 
 Usage (from benchmarking/):
-    python eval/run_eval_with_graph.py --split GAIA --model openai/gpt-4o
+    python eval/run_eval_with_graph.py --split GAIA --model gemini/gemini-2.5-flash --causal_only
     python eval/run_eval_with_graph.py --split GAIA --model openai/gpt-4o --edge_threshold 0.15
 
 Outputs are saved to:
-    outputs/outputs_{model}-{split}-graph_guided/
+    outputs/zero_shot/outputs_{model}-{split}-graph_{tag}/
 and can be scored with the standard calculate_scores.py.
 """
 
@@ -35,11 +35,12 @@ from tqdm import tqdm
 load_dotenv(find_dotenv())
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths — default graph JSON files (no torch/embeddings needed)
 # ---------------------------------------------------------------------------
-BENCH_DIR           = Path(__file__).resolve().parent.parent
-GRAPH_DATA_DIR      = BENCH_DIR.parent / "graph" / "data"
-DEFAULT_GRAPH_INPUT = GRAPH_DATA_DIR / "graph_input.pt"
+BENCH_DIR              = Path(__file__).resolve().parent.parent
+CAUSAL_DIR             = BENCH_DIR / "data" / "trail_causal_outputs_full_gaia_swe_AIC"
+DEFAULT_CAUSAL_GRAPH   = CAUSAL_DIR / "capri_graph.json"
+DEFAULT_SUPPES_GRAPH   = CAUSAL_DIR / "suppes_graph.json"
 
 sys.path.insert(0, str(BENCH_DIR))
 from span_level_parser import parse_trace_to_step_level, _span_name
@@ -75,70 +76,57 @@ def build_span_index(trace_str: str) -> str:
                 lines.append(f'    span_id "{csid}"  ({csname})')
     return "\n".join(lines)
 
-# Default edge weight threshold — only edges at or above this are shown to the LLM.
+# Default pr_delta threshold — only Suppes edges at or above this are shown to the LLM.
 DEFAULT_EDGE_THRESHOLD = 0.10
 
 
 # ---------------------------------------------------------------------------
-# Load and format Suppes graph
+# Load and format causal / Suppes graph (plain JSON, no torch needed)
 # ---------------------------------------------------------------------------
 
-def load_suppes_edges(
-    threshold: float,
+def load_graph_edges(
+    threshold: float = DEFAULT_EDGE_THRESHOLD,
     causal_only: bool = False,
-    graph_input: Path = DEFAULT_GRAPH_INPUT,
+    causal_graph: Path = DEFAULT_CAUSAL_GRAPH,
+    suppes_graph: Path = DEFAULT_SUPPES_GRAPH,
 ) -> list[tuple[str, str, float]]:
     """
-    Load edges from graph_input.pt.
+    Load edges directly from JSON files — no torch or embeddings required.
 
     Two modes:
-      causal_only=True  — return only edges where edge_is_causal==1 (bootstrap
-                          stability=1.0, i.e. survived 100% of bootstrap rounds).
-                          These are the fully validated causal edges (~11 edges).
-      causal_only=False — return all Suppes edges with weight >= threshold.
-                          edge_weight is bootstrap stability in [0,1]; threshold
-                          filters by stability but does NOT imply causal validation.
-
-    Note: ALL edges in the graph already passed the Suppes precedence + probability-
-    raising tests. edge_weight encodes how often each edge survived bootstrap
-    resampling. edge_is_causal marks the subset stable across 100% of samples.
+      causal_only=True  — load the 13 CAPRI-AIC edges from capri_graph.json.
+                          Weight = pr_delta from the Suppes graph (if available),
+                          else 1.0. These are the intervention-validated causal edges.
+      causal_only=False — load all Suppes edges from suppes_graph.json with
+                          pr_delta >= threshold. Weight = pr_delta.
     """
-    try:
-        import torch
-    except ImportError:
-        raise ImportError("torch is required to load the Suppes graph. "
-                          "Run from the causal conda environment or install torch.")
-
-    if not graph_input.exists():
-        raise FileNotFoundError(
-            f"{graph_input} not found — run graph/04_build_graph_input.py first."
-        )
-
-    gi             = torch.load(graph_input, weights_only=False)
-    node_names     = gi["node_names"]           # list of 20 strings
-    edge_index     = gi["edge_index"]           # (2, E)
-    edge_weight    = gi["edge_weight"]          # (E,)  bootstrap stability in [0,1]
-    edge_is_causal = gi.get("edge_is_causal")  # (E,)  1.0 = validated causal edge
-    correct_idx    = node_names.index("Correct") if "Correct" in node_names else len(node_names) - 1
-
-    edges = []
-    for i in range(edge_index.shape[1]):
-        src = edge_index[0, i].item()
-        dst = edge_index[1, i].item()
-        w   = edge_weight[i].item()
-
-        if src == correct_idx or dst == correct_idx:
-            continue
-
-        if causal_only:
-            is_causal = (edge_is_causal[i].item() == 1.0) if edge_is_causal is not None else (w == 1.0)
-            if not is_causal:
-                continue
-        else:
-            if w < threshold:
-                continue
-
-        edges.append((node_names[src], node_names[dst], w))
+    if causal_only:
+        if not causal_graph.exists():
+            raise FileNotFoundError(f"{causal_graph} not found")
+        with open(causal_graph) as f:
+            data = json.load(f)
+        # Build pr_delta lookup from Suppes graph for richer weights
+        pr_lookup: dict[tuple[str, str], float] = {}
+        if suppes_graph.exists():
+            with open(suppes_graph) as f:
+                sg = json.load(f)
+            for e in sg["edges"]:
+                pr_lookup[(e["a"], e["b"])] = e["pr_delta"]
+        edges = []
+        for e in data["edges"]:
+            a, b = e["a"], e["b"]
+            w = pr_lookup.get((a, b), 1.0)
+            edges.append((a, b, w))
+    else:
+        if not suppes_graph.exists():
+            raise FileNotFoundError(f"{suppes_graph} not found")
+        with open(suppes_graph) as f:
+            data = json.load(f)
+        edges = [
+            (e["a"], e["b"], e["pr_delta"])
+            for e in data["edges"]
+            if e["pr_delta"] >= threshold
+        ]
 
     edges.sort(key=lambda x: -x[2])
     return edges
@@ -410,29 +398,31 @@ def main() -> None:
     parser.add_argument("--split",          type=str,   default="GAIA",
                         help="Dataset split: GAIA or SWE Bench")
     parser.add_argument("--edge_threshold", type=float, default=DEFAULT_EDGE_THRESHOLD,
-                        help="Minimum bootstrap stability weight to include (ignored if --causal_only)")
+                        help="Minimum pr_delta to include Suppes edges (ignored if --causal_only)")
     parser.add_argument("--causal_only",    action="store_true",
-                        help="Use only the ~11 fully validated causal edges (edge_is_causal=1, "
-                             "bootstrap stability=1.0) instead of all Suppes edges")
-    parser.add_argument("--graph_input",   type=str,   default=None,
-                        help="Path to graph_input.pt (default: graph/data/graph_input.pt). "
-                             "Use graph/data_train/graph_input.pt for train-only leakage-free graph.")
+                        help="Use only the 13 CAPRI-AIC validated causal edges from capri_graph.json")
+    parser.add_argument("--causal_graph",   type=str,   default=None,
+                        help=f"Path to capri_graph.json (default: {DEFAULT_CAUSAL_GRAPH})")
+    parser.add_argument("--suppes_graph",   type=str,   default=None,
+                        help=f"Path to suppes_graph.json (default: {DEFAULT_SUPPES_GRAPH})")
     parser.add_argument("--span_index",    action="store_true", default=False,
                         help="Prepend compact span_id index to each prompt")
     args = parser.parse_args()
 
+    causal_graph_path = Path(args.causal_graph) if args.causal_graph else DEFAULT_CAUSAL_GRAPH
+    suppes_graph_path = Path(args.suppes_graph) if args.suppes_graph else DEFAULT_SUPPES_GRAPH
+
     # ------------------------------------------------------------------
     # Build graph guidance string once (shared across all traces)
     # ------------------------------------------------------------------
-    graph_input_path = Path(args.graph_input) if args.graph_input else DEFAULT_GRAPH_INPUT
-    print(f"Loading Suppes graph from {graph_input_path} ...")
-    edges = load_suppes_edges(args.edge_threshold, causal_only=args.causal_only,
-                              graph_input=graph_input_path)
+    print(f"Loading graph edges (causal_only={args.causal_only}) ...")
+    edges = load_graph_edges(args.edge_threshold, causal_only=args.causal_only,
+                             causal_graph=causal_graph_path, suppes_graph=suppes_graph_path)
     graph_guidance = format_graph_guidance(edges)
     if args.causal_only:
-        print(f"  {len(edges)} edges included (causal_only=True, bootstrap stability=1.0)")
+        print(f"  {len(edges)} edges included (causal_only, from {causal_graph_path.name})")
     else:
-        print(f"  {len(edges)} edges included (bootstrap stability >= {args.edge_threshold})")
+        print(f"  {len(edges)} edges included (pr_delta >= {args.edge_threshold}, from {suppes_graph_path.name})")
     print()
     print("--- Graph guidance preview (first 10 edges) ---")
     for line in graph_guidance.splitlines()[:15]:
@@ -444,9 +434,6 @@ def main() -> None:
     # ------------------------------------------------------------------
     model_tag  = args.model.replace("/", "-")
     graph_tag  = "causal_only" if args.causal_only else f"suppes_t{args.edge_threshold}"
-    # Append _train suffix when using train-only graph
-    if args.graph_input and "data_train" in args.graph_input:
-        graph_tag += "_train"
     span_tag   = "_span_index" if args.span_index else ""
     output_dir = os.path.join(
         args.output_dir,

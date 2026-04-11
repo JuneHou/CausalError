@@ -215,13 +215,22 @@ def main():
     out_dir = os.path.join(args.output_dir, f"outputs_{model_tag}-{args.split}{suffix}")
     os.makedirs(out_dir, exist_ok=True)
 
-    data_dir = os.path.join(args.data_dir, args.split)
+    # If data_dir already contains JSON files directly, use it as-is;
+    # otherwise fall back to the original data_dir/split layout.
+    if glob.glob(os.path.join(args.data_dir, "*.json")):
+        data_dir = args.data_dir
+    else:
+        data_dir = os.path.join(args.data_dir, args.split)
     file_paths = sorted(glob.glob(f"{data_dir}/*.json"))
     print(f"Found {len(file_paths)} traces in {data_dir}")
     print(f"Output → {out_dir}\n")
 
     print(f"Loading tokenizer for {args.model} ...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    is_mistral = "Mistral" in args.model or "mistral" in args.model
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, trust_remote_code=True,
+        **({"fix_mistral_regex": True} if is_mistral else {}),
+    )
 
     print(f"Loading model {args.model} ...")
     is_qwen3_1m = "Qwen3-30B-A3B" in args.model
@@ -248,7 +257,7 @@ def main():
     sp = SamplingParams(temperature=0.0, max_tokens=args.max_new_tokens)
 
     skipped = 0
-    for fp in tqdm(file_paths):
+    for fp in tqdm(file_paths, position=0, leave=True):
         out_file = os.path.join(out_dir, os.path.basename(fp))
         if os.path.exists(out_file):
             continue
@@ -257,19 +266,29 @@ def main():
             trace = f.read()
 
         span_idx = build_span_index(trace) if args.span_index else ""
-        messages = [{"role": "user", "content": get_prompt(trace, span_index=span_idx)}]
-        prompt_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        user_text = get_prompt(trace, span_index=span_idx)
+        if tokenizer.chat_template is None:
+            # Fallback for Mistral tokenizers without a chat_template.
+            bos = tokenizer.bos_token or "<s>"
+            prompt_text = f"{bos}[INST] {user_text} [/INST]"
+        else:
+            messages = [{"role": "user", "content": user_text}]
+            prompt_text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
 
         tok_len = len(tokenizer.encode(prompt_text, add_special_tokens=False))
-        if tok_len >= args.max_model_len:
-            print(f"\nSkipping {os.path.basename(fp)}: prompt too long ({tok_len:,} tokens)")
+        _min_output = 8192
+        if tok_len + _min_output > args.max_model_len:
+            print(f"\nSkipping {os.path.basename(fp)}: prompt too long ({tok_len:,} tokens, ctx limit {args.max_model_len:,})")
             response = "Context window exceeded. No output generated."
             skipped += 1
         else:
+            # Cap output tokens to what the context window can actually fit.
+            _avail = args.max_model_len - tok_len
+            _sp = SamplingParams(temperature=0.0, max_tokens=min(args.max_new_tokens, _avail)) if _avail < args.max_new_tokens else sp
             try:
-                output = llm.generate([prompt_text], sp)[0].outputs[0]
+                output = llm.generate([prompt_text], _sp)[0].outputs[0]
                 response = output.text
             except Exception as e:
                 print(f"\nError on {os.path.basename(fp)}: {e}")

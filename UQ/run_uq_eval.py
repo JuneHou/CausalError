@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # Suppress HuggingFace "Token indices sequence length > model_max_length" warning.
-# The tokenizer config has model_max_length=16384 but vLLM uses max_model_len=131072.
+# The tokenizer config may have a small model_max_length; we override it with the actual context size.
 # This warning fires from the transformers logging system (not Python warnings module).
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
@@ -450,6 +450,11 @@ def validate_and_repair_locations(
 def _apply_chat_template(tokenizer: "AutoTokenizer", user_text: str) -> str:
     """Format a user message with the model's chat template."""
     messages = [{"role": "user", "content": user_text}]
+    if tokenizer.chat_template is None:
+        # Fallback for tokenizers without a chat_template (e.g. some Mistral variants).
+        # Uses the standard Mistral [INST] format.
+        bos = tokenizer.bos_token or "<s>"
+        return f"{bos}[INST] {user_text} [/INST]"
     return tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -821,7 +826,33 @@ def run_pipeline(
     # --- Pass 1 ---
     p1_text     = format_prompt(build_pass1_prompt(trace_str, span_index=span_index))
     p1_tok_len  = prompt_token_len(p1_text)
-    print(f"  [Pass 1] prompt tokens: {p1_tok_len:,}  (model limit: {sp_greedy.max_tokens} output, {131072} context)")
+    ctx_limit   = llm.llm_engine.model_config.max_model_len
+    print(f"  [Pass 1] prompt tokens: {p1_tok_len:,}  (model limit: {sp_greedy.max_tokens} output, {ctx_limit:,} context)")
+
+    # Skip traces whose prompt alone leaves too few tokens for a useful response.
+    _min_output = 256
+    if p1_tok_len + _min_output > ctx_limit:
+        print(f"  [Pass 1] SKIP — prompt ({p1_tok_len:,}) + min_output ({_min_output}) > ctx_limit ({ctx_limit:,})")
+        return {
+            "errors": [],
+            "scores": [{"reliability_score": 0, "reliability_reasoning": "trace too long",
+                        "security_score": 5, "security_reasoning": "",
+                        "instruction_adherence_score": 0, "instruction_adherence_reasoning": "",
+                        "plan_opt_score": 0, "plan_opt_reasoning": "", "overall": 0}],
+            "_uq_meta": {"skipped_too_long": True, "pass1_prompt_tokens": p1_tok_len},
+        }
+
+    # Cap output tokens to what the context window can actually fit.
+    _avail_output = ctx_limit - p1_tok_len
+    if _avail_output < max_new_tokens:
+        print(f"  [Pass 1] capping output tokens {max_new_tokens} → {_avail_output} (context pressure)")
+        sp_greedy = SamplingParams(
+            temperature=0.0,
+            max_tokens=_avail_output,
+            logprobs=0 if (graph_probe or consistency_confidence or graph_inject) else 1,
+            stop=None,
+        )
+        sp_no_lp = SamplingParams(temperature=0.0, max_tokens=_avail_output)
 
     p1_out  = llm.generate([p1_text], sp_greedy)[0].outputs[0]
     print(f"  [Pass 1] response tokens: {len(p1_out.token_ids):,}  finish_reason: {p1_out.finish_reason}")
@@ -1029,8 +1060,8 @@ def main() -> None:
                         help="Override output directory")
     parser.add_argument("--model",                  type=str,   default=MODEL_ID)
     parser.add_argument("--tensor_parallel_size",     type=int,   default=4)
-    parser.add_argument("--max_model_len",            type=int,   default=131072,
-                        help="Maximum sequence length (must not exceed model's max_position_embeddings=131072)")
+    parser.add_argument("--max_model_len",            type=int,   default=None,
+                        help="Maximum sequence length; defaults to None (vLLM uses the model's max_position_embeddings)")
     parser.add_argument("--gpu_memory_utilization",   type=float, default=0.75,
                         help="Fraction of GPU memory vLLM may use (lower if other jobs are running)")
     parser.add_argument("--enforce_eager",            action="store_true", default=True,
@@ -1112,9 +1143,10 @@ def main() -> None:
     print(f"\nLoading tokenizer for {args.model} ...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     # Suppress false "sequence longer than model_max_length" warnings —
-    # the tokenizer config has model_max_length=16384 but vLLM is configured
-    # with max_model_len=131072, which is the actual model context window.
-    tokenizer.model_max_length = args.max_model_len
+    # the tokenizer config may have a small model_max_length but vLLM uses
+    # the model's actual max_position_embeddings (or the value of --max_model_len).
+    # Set to a large sentinel so transformers does not fire the warning.
+    tokenizer.model_max_length = args.max_model_len if args.max_model_len is not None else int(1e9)
 
     # --- Load vLLM model ---
     print(f"Loading model {args.model} with tensor_parallel_size={args.tensor_parallel_size} ...")

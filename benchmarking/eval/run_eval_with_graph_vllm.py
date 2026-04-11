@@ -25,9 +25,10 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
-BENCH_DIR = Path(__file__).resolve().parent.parent
-GRAPH_DATA_DIR = BENCH_DIR.parent / "graph" / "data"
-DEFAULT_GRAPH_INPUT = GRAPH_DATA_DIR / "graph_input.pt"
+BENCH_DIR            = Path(__file__).resolve().parent.parent
+CAUSAL_DIR           = BENCH_DIR / "data" / "trail_causal_outputs_full_gaia_swe_AIC"
+DEFAULT_CAUSAL_GRAPH = CAUSAL_DIR / "capri_graph.json"
+DEFAULT_SUPPES_GRAPH = CAUSAL_DIR / "suppes_graph.json"
 
 sys.path.insert(0, str(BENCH_DIR))
 from span_level_parser import parse_trace_to_step_level, _span_name
@@ -68,33 +69,30 @@ def build_span_index(trace_str: str) -> str:
 # Causal graph loading + formatting (same logic as run_eval_with_graph.py)
 # ---------------------------------------------------------------------------
 
-def load_suppes_edges(causal_only: bool = False, threshold: float = 0.10,
-                      graph_input: Path = DEFAULT_GRAPH_INPUT) -> list:
-    import torch
-    if not graph_input.exists():
-        raise FileNotFoundError(f"{graph_input} not found")
-    gi = torch.load(graph_input, weights_only=False)
-    node_names = gi["node_names"]
-    edge_index = gi["edge_index"]
-    edge_weight = gi["edge_weight"]
-    edge_is_causal = gi.get("edge_is_causal")
-    correct_idx = node_names.index("Correct") if "Correct" in node_names else len(node_names) - 1
-
-    edges = []
-    for i in range(edge_index.shape[1]):
-        src = edge_index[0, i].item()
-        dst = edge_index[1, i].item()
-        w = edge_weight[i].item()
-        if src == correct_idx or dst == correct_idx:
-            continue
-        if causal_only:
-            is_causal = (edge_is_causal[i].item() == 1.0) if edge_is_causal is not None else (w == 1.0)
-            if not is_causal:
-                continue
-        else:
-            if w < threshold:
-                continue
-        edges.append((node_names[src], node_names[dst], w))
+def load_graph_edges(causal_only: bool = False, threshold: float = 0.10,
+                     causal_graph: Path = DEFAULT_CAUSAL_GRAPH,
+                     suppes_graph: Path = DEFAULT_SUPPES_GRAPH) -> list:
+    """Load edges from plain JSON files — no torch or embeddings needed."""
+    if causal_only:
+        if not causal_graph.exists():
+            raise FileNotFoundError(f"{causal_graph} not found")
+        with open(causal_graph) as f:
+            data = json.load(f)
+        pr_lookup: dict = {}
+        if suppes_graph.exists():
+            with open(suppes_graph) as f:
+                sg = json.load(f)
+            for e in sg["edges"]:
+                pr_lookup[(e["a"], e["b"])] = e["pr_delta"]
+        edges = [(e["a"], e["b"], pr_lookup.get((e["a"], e["b"]), 1.0))
+                 for e in data["edges"]]
+    else:
+        if not suppes_graph.exists():
+            raise FileNotFoundError(f"{suppes_graph} not found")
+        with open(suppes_graph) as f:
+            data = json.load(f)
+        edges = [(e["a"], e["b"], e["pr_delta"])
+                 for e in data["edges"] if e["pr_delta"] >= threshold]
 
     edges.sort(key=lambda x: -x[2])
     return edges
@@ -269,17 +267,21 @@ def main():
     parser.add_argument("--span_index",             action="store_true", default=False,
                         help="Prepend compact span_id index to each prompt")
     parser.add_argument("--causal_only",            action="store_true", default=False,
-                        help="Use only the 11 bootstrap-validated causal edges (w=1.0)")
+                        help="Use only the 13 CAPRI-AIC validated causal edges")
     parser.add_argument("--edge_threshold",         type=float, default=0.10,
-                        help="Min edge weight to include when not using --causal_only")
-    parser.add_argument("--graph_input",            type=str,   default=None)
+                        help="Min pr_delta to include Suppes edges (ignored if --causal_only)")
+    parser.add_argument("--causal_graph",           type=str,   default=None,
+                        help=f"Path to capri_graph.json (default: {DEFAULT_CAUSAL_GRAPH})")
+    parser.add_argument("--suppes_graph",           type=str,   default=None,
+                        help=f"Path to suppes_graph.json (default: {DEFAULT_SUPPES_GRAPH})")
     args = parser.parse_args()
 
-    graph_input = Path(args.graph_input) if args.graph_input else DEFAULT_GRAPH_INPUT
-    edges = load_suppes_edges(causal_only=args.causal_only, threshold=args.edge_threshold,
-                              graph_input=graph_input)
+    causal_graph = Path(args.causal_graph) if args.causal_graph else DEFAULT_CAUSAL_GRAPH
+    suppes_graph = Path(args.suppes_graph) if args.suppes_graph else DEFAULT_SUPPES_GRAPH
+    edges = load_graph_edges(causal_only=args.causal_only, threshold=args.edge_threshold,
+                             causal_graph=causal_graph, suppes_graph=suppes_graph)
     graph_guidance = format_graph_guidance(edges)
-    print(f"Loaded {len(edges)} causal edges ({'causal_only' if args.causal_only else f'threshold={args.edge_threshold}'})")
+    print(f"Loaded {len(edges)} edges ({'causal_only' if args.causal_only else f'pr_delta>={args.edge_threshold}'})")
 
     model_tag = args.model.replace("/", "-")
     graph_tag = "graph_causal_only" if args.causal_only else f"graph_t{args.edge_threshold}"
@@ -292,7 +294,11 @@ def main():
     print(f"Found {len(file_paths)} traces in {data_dir}")
     print(f"Output → {out_dir}\n")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    is_mistral = "Mistral" in args.model or "mistral" in args.model
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, trust_remote_code=True,
+        **({"fix_mistral_regex": True} if is_mistral else {}),
+    )
     is_qwen3_1m = "Qwen3-30B-A3B" in args.model
     if is_qwen3_1m:
         import os as _os
@@ -325,9 +331,13 @@ def main():
             trace = f.read()
 
         span_idx = build_span_index(trace) if args.span_index else ""
-        messages = [{"role": "user", "content": get_prompt(trace, span_index=span_idx,
-                                                            graph_guidance=graph_guidance)}]
-        prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        user_text = get_prompt(trace, span_index=span_idx, graph_guidance=graph_guidance)
+        if tokenizer.chat_template is None:
+            bos = tokenizer.bos_token or "<s>"
+            prompt_text = f"{bos}[INST] {user_text} [/INST]"
+        else:
+            messages = [{"role": "user", "content": user_text}]
+            prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
         tok_len = len(tokenizer.encode(prompt_text, add_special_tokens=False))
         if tok_len >= args.max_model_len:

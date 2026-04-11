@@ -53,9 +53,10 @@ load_dotenv(find_dotenv())
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-BENCH_DIR           = Path(__file__).resolve().parent.parent
-GRAPH_DATA_DIR      = BENCH_DIR.parent / "graph" / "data"
-DEFAULT_GRAPH_INPUT = GRAPH_DATA_DIR / "graph_input.pt"
+BENCH_DIR            = Path(__file__).resolve().parent.parent
+CAUSAL_DIR           = BENCH_DIR / "data" / "trail_causal_outputs_full_gaia_swe_AIC"
+DEFAULT_CAUSAL_GRAPH = CAUSAL_DIR / "capri_graph.json"
+DEFAULT_SUPPES_GRAPH = CAUSAL_DIR / "suppes_graph.json"
 
 sys.path.insert(0, str(BENCH_DIR))
 from span_level_parser import parse_trace_to_step_level, _span_name
@@ -283,53 +284,49 @@ def build_graph_inject_prompt(
 # Suppes graph loading + propagation
 # ---------------------------------------------------------------------------
 
-def load_suppes_edges(
+def load_graph_edges(
     threshold: float = 0.10,
     causal_only: bool = False,
     corr_threshold: float = 1.0,
-    graph_input: Path = DEFAULT_GRAPH_INPUT,
+    causal_graph: Path = DEFAULT_CAUSAL_GRAPH,
+    suppes_graph: Path = DEFAULT_SUPPES_GRAPH,
 ) -> List[Tuple[str, str, float]]:
     """
-    Load edges from graph_input.pt.
+    Load edges from plain JSON files — no torch or embeddings needed.
 
     Selection modes:
-      causal_only=True         — only ~11 bootstrap-validated causal edges (stability=1.0)
-      corr_threshold < 1.0     — causal edges + correlation edges with w >= corr_threshold
-                                 (recommended: corr_threshold=0.20, gives ~26 edges)
-      default                  — all edges with w >= threshold
+      causal_only=True         — 13 CAPRI-AIC edges from capri_graph.json (weight=pr_delta)
+      corr_threshold < 1.0     — causal edges + Suppes edges with pr_delta >= corr_threshold
+                                 (recommended: corr_threshold=0.20)
+      default                  — all Suppes edges with pr_delta >= threshold
     """
-    try:
-        import torch
-    except ImportError:
-        raise ImportError("torch is required to load the Suppes graph.")
-    if not graph_input.exists():
-        raise FileNotFoundError(f"{graph_input} not found — run graph/04_build_graph_input.py first.")
+    # Load Suppes edges for pr_delta lookup and threshold filtering
+    if not suppes_graph.exists():
+        raise FileNotFoundError(f"{suppes_graph} not found")
+    with open(suppes_graph) as f:
+        sg = json.load(f)
+    suppes_by_key = {(e["a"], e["b"]): e["pr_delta"] for e in sg["edges"]}
 
-    gi             = torch.load(graph_input, weights_only=False)
-    node_names     = gi["node_names"]
-    edge_index     = gi["edge_index"]
-    edge_weight    = gi["edge_weight"]
-    edge_is_causal = gi.get("edge_is_causal")
-    correct_idx    = node_names.index("Correct") if "Correct" in node_names else len(node_names) - 1
-
-    edges = []
-    for i in range(edge_index.shape[1]):
-        src = edge_index[0, i].item()
-        dst = edge_index[1, i].item()
-        w   = edge_weight[i].item()
-        if src == correct_idx or dst == correct_idx:
-            continue
-        is_causal = (edge_is_causal[i].item() == 1.0) if edge_is_causal is not None else (w == 1.0)
-        if causal_only:
-            if not is_causal:
-                continue
-        elif corr_threshold < 1.0:
-            if not is_causal and w < corr_threshold:
-                continue
-        else:
-            if w < threshold:
-                continue
-        edges.append((node_names[src], node_names[dst], w))
+    if causal_only:
+        if not causal_graph.exists():
+            raise FileNotFoundError(f"{causal_graph} not found")
+        with open(causal_graph) as f:
+            cg = json.load(f)
+        edges = [(e["a"], e["b"], suppes_by_key.get((e["a"], e["b"]), 1.0))
+                 for e in cg["edges"]]
+    elif corr_threshold < 1.0:
+        # Causal edges (all) + correlation Suppes edges above corr_threshold
+        causal_keys: set = set()
+        if causal_graph.exists():
+            with open(causal_graph) as f:
+                cg = json.load(f)
+            causal_keys = {(e["a"], e["b"]) for e in cg["edges"]}
+        edges = []
+        for (a, b), w in suppes_by_key.items():
+            if (a, b) in causal_keys or w >= corr_threshold:
+                edges.append((a, b, w))
+    else:
+        edges = [(a, b, w) for (a, b), w in suppes_by_key.items() if w >= threshold]
 
     edges.sort(key=lambda x: -x[2])
     return edges
@@ -687,12 +684,12 @@ def main() -> None:
     parser.add_argument("--output_dir",     type=str,   default="outputs/zero_shot")
     parser.add_argument("--max_workers",    type=int,   default=5)
     parser.add_argument("--causal_only",    action="store_true",
-                        help="Use only ~11 validated causal edges (stability=1.0)")
+                        help="Use only the 13 CAPRI-AIC validated causal edges")
     parser.add_argument("--corr_threshold", type=float, default=1.0,
-                        help="Include causal + correlation edges with w >= this value. "
-                             "Set to 0.20 for extended ~26-edge graph. Ignored if --causal_only.")
+                        help="Include causal + Suppes edges with pr_delta >= this. "
+                             "Set to 0.20 for extended graph. Ignored if --causal_only.")
     parser.add_argument("--edge_threshold", type=float, default=0.10,
-                        help="Min edge weight for default (non-causal-only) mode.")
+                        help="Min pr_delta for default (non-causal-only) Suppes mode.")
     parser.add_argument("--propagation_threshold", type=float, default=0.10,
                         help="Min boosted score to trigger Pass 2 for a target category.")
     parser.add_argument("--span_index",     action="store_true", default=False,
@@ -700,30 +697,35 @@ def main() -> None:
     parser.add_argument("--validate_span_id", action="store_true", default=True,
                         help="Drop errors whose location is not a valid span_id in the trace.")
     parser.add_argument("--no_validate_span_id", dest="validate_span_id", action="store_false")
-    parser.add_argument("--graph_input",    type=str,   default=None,
-                        help="Path to graph_input.pt. Defaults to graph/data/graph_input.pt.")
+    parser.add_argument("--causal_graph",   type=str,   default=None,
+                        help=f"Path to capri_graph.json (default: {DEFAULT_CAUSAL_GRAPH})")
+    parser.add_argument("--suppes_graph",   type=str,   default=None,
+                        help=f"Path to suppes_graph.json (default: {DEFAULT_SUPPES_GRAPH})")
     args = parser.parse_args()
+
+    causal_graph_path = Path(args.causal_graph) if args.causal_graph else DEFAULT_CAUSAL_GRAPH
+    suppes_graph_path = Path(args.suppes_graph) if args.suppes_graph else DEFAULT_SUPPES_GRAPH
 
     # ------------------------------------------------------------------
     # Load graph
     # ------------------------------------------------------------------
-    graph_input_path = Path(args.graph_input) if args.graph_input else DEFAULT_GRAPH_INPUT
-    print(f"Loading Suppes graph from {graph_input_path} ...")
-    edges = load_suppes_edges(
+    print(f"Loading graph edges (causal_only={args.causal_only}, corr_threshold={args.corr_threshold}) ...")
+    edges = load_graph_edges(
         threshold=args.edge_threshold,
         causal_only=args.causal_only,
         corr_threshold=args.corr_threshold,
-        graph_input=graph_input_path,
+        causal_graph=causal_graph_path,
+        suppes_graph=suppes_graph_path,
     )
     if args.causal_only:
         graph_tag = "causal_only"
-        print(f"  {len(edges)} edges (causal_only=True)")
+        print(f"  {len(edges)} edges (causal_only)")
     elif args.corr_threshold < 1.0:
         graph_tag = f"causal_corr{args.corr_threshold}"
-        print(f"  {len(edges)} edges (causal + corr w>={args.corr_threshold})")
+        print(f"  {len(edges)} edges (causal + corr pr_delta>={args.corr_threshold})")
     else:
         graph_tag = f"suppes_t{args.edge_threshold}"
-        print(f"  {len(edges)} edges (w>={args.edge_threshold})")
+        print(f"  {len(edges)} edges (pr_delta>={args.edge_threshold})")
     for src, dst, w in edges[:10]:
         print(f"    {src} → {dst}  ({w:.3f})")
     if len(edges) > 10:
