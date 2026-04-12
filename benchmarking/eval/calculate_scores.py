@@ -151,9 +151,17 @@ def main(ground_truth_dir: str, generated_dir: str):
         generated_file = f"{generated_dir}/{file_name}"
 
         if not os.path.exists(generated_file):
-            print(f"Generated file {generated_file} does not exist")
+            print(f"Generated file {generated_file} does not exist — counting as empty prediction")
+            ground_truth = json.load(open(file))
+            generated = {"errors": [], "scores": []}
+            metrics = calculate_metrics(ground_truth, generated, all_categories)
+            all_y_true.append(metrics["y_true"])
+            all_y_pred.append(metrics["y_pred"])
+            location_accuracy_sum += metrics["location_accuracy"]
+            joint_accuracy_sum += metrics["joint_accuracy"]
+            files_processed += 1
             continue
-        
+
         try:
             ground_truth, generated_text = load_files(file, generated_file)
             generated = extract_json_from_text(generated_text)

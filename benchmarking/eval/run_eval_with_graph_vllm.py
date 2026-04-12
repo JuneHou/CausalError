@@ -27,7 +27,7 @@ from transformers import AutoTokenizer
 
 BENCH_DIR            = Path(__file__).resolve().parent.parent
 CAUSAL_DIR           = BENCH_DIR / "data" / "trail_causal_outputs_full_gaia_swe_AIC"
-DEFAULT_CAUSAL_GRAPH = CAUSAL_DIR / "capri_graph.json"
+DEFAULT_CAUSAL_GRAPH = BENCH_DIR / "outputs" / "interventions_full_gaia_swe_merged" / "effect_edges.json"
 DEFAULT_SUPPES_GRAPH = CAUSAL_DIR / "suppes_graph.json"
 
 sys.path.insert(0, str(BENCH_DIR))
@@ -69,23 +69,42 @@ def build_span_index(trace_str: str) -> str:
 # Causal graph loading + formatting (same logic as run_eval_with_graph.py)
 # ---------------------------------------------------------------------------
 
+def _parse_causal_graph(path: Path, pr_lookup: dict) -> list:
+    """
+    Parse a causal graph JSON file.  Handles two formats:
+      - effect_edges.json  : {"edges": {"A -> B": {"a":..,"b":..,"validated":bool,"delta":..}}}
+        → returns only validated=true edges; weight = abs(delta)
+      - capri_graph.json   : {"edges": [{"a":..,"b":..}]}
+        → returns all edges; weight = pr_delta from Suppes lookup (else 1.0)
+    """
+    with open(path) as f:
+        data = json.load(f)
+    raw = data["edges"]
+    if isinstance(raw, dict):
+        return [
+            (v["a"], v["b"], abs(v["delta"]))
+            for v in raw.values()
+            if v.get("validated", False)
+        ]
+    else:
+        return [(e["a"], e["b"], pr_lookup.get((e["a"], e["b"]), 1.0)) for e in raw]
+
+
 def load_graph_edges(causal_only: bool = False, threshold: float = 0.10,
                      causal_graph: Path = DEFAULT_CAUSAL_GRAPH,
                      suppes_graph: Path = DEFAULT_SUPPES_GRAPH) -> list:
     """Load edges from plain JSON files — no torch or embeddings needed."""
+    pr_lookup: dict = {}
+    if suppes_graph.exists():
+        with open(suppes_graph) as f:
+            sg = json.load(f)
+        for e in sg["edges"]:
+            pr_lookup[(e["a"], e["b"])] = e["pr_delta"]
+
     if causal_only:
         if not causal_graph.exists():
             raise FileNotFoundError(f"{causal_graph} not found")
-        with open(causal_graph) as f:
-            data = json.load(f)
-        pr_lookup: dict = {}
-        if suppes_graph.exists():
-            with open(suppes_graph) as f:
-                sg = json.load(f)
-            for e in sg["edges"]:
-                pr_lookup[(e["a"], e["b"])] = e["pr_delta"]
-        edges = [(e["a"], e["b"], pr_lookup.get((e["a"], e["b"]), 1.0))
-                 for e in data["edges"]]
+        edges = _parse_causal_graph(causal_graph, pr_lookup)
     else:
         if not suppes_graph.exists():
             raise FileNotFoundError(f"{suppes_graph} not found")

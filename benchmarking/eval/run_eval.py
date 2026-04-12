@@ -165,14 +165,15 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o"):
             "drop_params": True,
         }
 
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             response = completion(**params)
             return response.choices[0].message["content"]
         except RateLimitError as e:
-            print(f"Rate limit error (attempt {attempt+1}/3): sleeping 60s and retrying...")
-            time.sleep(60)
-    raise RateLimitError("Exceeded 3 retries due to rate limiting")
+            wait = 60 * (2 ** attempt)  # 60, 120, 240, 480, 960s
+            print(f"Rate limit error (attempt {attempt+1}/5): sleeping {wait}s and retrying...")
+            time.sleep(wait)
+    raise Exception("Exceeded 5 retries due to rate limiting")
 
 
 def process_file(file_path, output_dir, model):
@@ -191,15 +192,15 @@ def process_file(file_path, output_dir, model):
         )
         response = "Context window exceeded. No output generated."
     except Exception as e:
-        print(f"Error processing file {file_path}: {e}. Creating empty output file.")
-        response = "Error processing file. No output generated."
+        print(f"Error processing file {file_path}: {e}. Skipping (will retry on next run).")
+        return file_path
 
     output_file = f"{output_dir}/{file_path.split('/')[-1]}"
     with open(output_file, "w") as f:
         if not response:
             response = "No output produced"
         f.write(response)
-    
+
     return file_path
 
 
@@ -244,7 +245,7 @@ def main():
     parser.add_argument(
         "--max_workers",
         type=int,
-        default=5,
+        default=1,
         help="Number of workers for parallel processing",
     )
     parser.add_argument(

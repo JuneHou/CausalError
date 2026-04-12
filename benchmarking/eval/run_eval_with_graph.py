@@ -39,7 +39,7 @@ load_dotenv(find_dotenv())
 # ---------------------------------------------------------------------------
 BENCH_DIR              = Path(__file__).resolve().parent.parent
 CAUSAL_DIR             = BENCH_DIR / "data" / "trail_causal_outputs_full_gaia_swe_AIC"
-DEFAULT_CAUSAL_GRAPH   = CAUSAL_DIR / "capri_graph.json"
+DEFAULT_CAUSAL_GRAPH   = BENCH_DIR / "outputs" / "interventions_full_gaia_swe_merged" / "effect_edges.json"
 DEFAULT_SUPPES_GRAPH   = CAUSAL_DIR / "suppes_graph.json"
 
 sys.path.insert(0, str(BENCH_DIR))
@@ -84,6 +84,29 @@ DEFAULT_EDGE_THRESHOLD = 0.10
 # Load and format causal / Suppes graph (plain JSON, no torch needed)
 # ---------------------------------------------------------------------------
 
+def _parse_causal_graph(path: Path, pr_lookup: dict) -> list[tuple[str, str, float]]:
+    """
+    Parse a causal graph JSON file.  Handles two formats:
+      - effect_edges.json  : {"edges": {"A -> B": {"a":..,"b":..,"validated":bool,"delta":..}}}
+        → returns only validated=true edges; weight = abs(delta)
+      - capri_graph.json   : {"edges": [{"a":..,"b":..}]}
+        → returns all edges; weight = pr_delta from Suppes lookup (else 1.0)
+    """
+    with open(path) as f:
+        data = json.load(f)
+    raw = data["edges"]
+    if isinstance(raw, dict):
+        # effect_edges.json format
+        return [
+            (v["a"], v["b"], abs(v["delta"]))
+            for v in raw.values()
+            if v.get("validated", False)
+        ]
+    else:
+        # capri_graph.json format
+        return [(e["a"], e["b"], pr_lookup.get((e["a"], e["b"]), 1.0)) for e in raw]
+
+
 def load_graph_edges(
     threshold: float = DEFAULT_EDGE_THRESHOLD,
     causal_only: bool = False,
@@ -94,29 +117,23 @@ def load_graph_edges(
     Load edges directly from JSON files — no torch or embeddings required.
 
     Two modes:
-      causal_only=True  — load the 13 CAPRI-AIC edges from capri_graph.json.
-                          Weight = pr_delta from the Suppes graph (if available),
-                          else 1.0. These are the intervention-validated causal edges.
+      causal_only=True  — load intervention-validated causal edges from effect_edges.json
+                          (or capri_graph.json as fallback). Weight = abs(delta).
       causal_only=False — load all Suppes edges from suppes_graph.json with
                           pr_delta >= threshold. Weight = pr_delta.
     """
+    # Build pr_delta lookup for capri fallback
+    pr_lookup: dict[tuple[str, str], float] = {}
+    if suppes_graph.exists():
+        with open(suppes_graph) as f:
+            sg = json.load(f)
+        for e in sg["edges"]:
+            pr_lookup[(e["a"], e["b"])] = e["pr_delta"]
+
     if causal_only:
         if not causal_graph.exists():
             raise FileNotFoundError(f"{causal_graph} not found")
-        with open(causal_graph) as f:
-            data = json.load(f)
-        # Build pr_delta lookup from Suppes graph for richer weights
-        pr_lookup: dict[tuple[str, str], float] = {}
-        if suppes_graph.exists():
-            with open(suppes_graph) as f:
-                sg = json.load(f)
-            for e in sg["edges"]:
-                pr_lookup[(e["a"], e["b"])] = e["pr_delta"]
-        edges = []
-        for e in data["edges"]:
-            a, b = e["a"], e["b"]
-            w = pr_lookup.get((a, b), 1.0)
-            edges.append((a, b, w))
+        edges = _parse_causal_graph(causal_graph, pr_lookup)
     else:
         if not suppes_graph.exists():
             raise FileNotFoundError(f"{suppes_graph} not found")

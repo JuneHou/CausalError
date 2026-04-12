@@ -6,13 +6,33 @@ Documents every field removed or restructured by `compress_traces.py`, with just
 
 ## Overview
 
-| Stage | Total size (GAIA, 117 traces) | Avg per trace |
-|---|---|---|
-| Original | 111.21 MB | 950.5 KB |
-| After compression | 51.86 MB | 443.2 KB |
-| Reduction | **−53.4%** | |
+### GAIA (117 traces) — compress only
 
-Traces > 500 KB: 41 → 29.
+| Stage | Total size | Avg per trace | Traces >500 KB |
+|---|---|---|---|
+| Original | 111.21 MB | 950.5 KB | 41 |
+| After `--compress` | 51.86 MB | 443.2 KB | 29 |
+| Reduction | **−53.4%** | | −12 |
+
+### GAIA (117 traces) — compress + dedup (`--dedup`)
+
+| Stage | Total size | Avg per trace | Traces >500 KB |
+|---|---|---|---|
+| Original | 111.21 MB | 950.5 KB | 41 |
+| After `--dedup` | 36.70 MB | 313.7 KB | 26 |
+| Reduction | **−67.0%** | | −15 |
+
+### SWE Bench (31 traces) — compress + dedup (`--dedup`)
+
+| Stage | Total size | Avg per trace | Traces >500 KB |
+|---|---|---|---|
+| Original | 74.37 MB | 2398.9 KB | 30 |
+| After `--dedup` | 14.23 MB | 459.0 KB | 10 |
+| Reduction | **−80.9%** | | −20 |
+
+SWE Bench traces are much larger on average (2399 KB vs 951 KB for GAIA) due to longer
+accumulated conversation histories, which makes the `--dedup` step proportionally more
+effective (−80.9% vs −67.0%).
 
 ---
 

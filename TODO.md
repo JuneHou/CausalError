@@ -56,51 +56,75 @@ python eval/run_eval_graph_inject.py \
     --output_dir outputs/zero_shot2
 ```
 
-### 1b. Gemini-2.5-Flash — SWE Bench (2 conditions)
+### 1b. Gemini-2.5-Flash — SWE Bench (4 conditions)
 
 Note: the zero_shot/ no-graph baseline only ran 14/31 traces (incomplete run).
 Re-run in zero_shot2/ on all 31 traces to get a clean comparable pair.
+Note: `data/SWE Bench_dedup` is available (−80.9% size) if context window errors persist.
 
 ```bash
-# [5] No-graph baseline (all 31 SWE Bench traces)
+#  DONE [5] No-graph baseline (all 31 SWE Bench traces)
 python eval/run_eval.py \
     --model gemini/gemini-2.5-flash \
     --split "SWE Bench" \
     --output_dir outputs/zero_shot2
 
-# [6] Causal-only graph
+#  DONE [6] Causal-only graph
 python eval/run_eval_with_graph.py \
     --model gemini/gemini-2.5-flash \
     --split "SWE Bench" \
     --causal_only \
+    --output_dir outputs/zero_shot2
+
+# [7] Causal-only + span index
+python eval/run_eval_with_graph.py \
+    --model gemini/gemini-2.5-flash \
+    --split "SWE Bench" \
+    --causal_only --span_index \
+    --output_dir outputs/zero_shot2
+
+# [8] Extended graph (causal + correlation edges w>=0.2) + span index
+python eval/run_eval_graph_inject.py \
+    --model gemini/gemini-2.5-flash \
+    --split "SWE Bench" \
+    --causal_only --corr_threshold 0.2 --span_index \
     --output_dir outputs/zero_shot2
 ```
 
 ### 1c. Mistral-Small-3.1-24B — GAIA_dedup (3 conditions)
 
 All three conditions use the same GAIA_dedup split so the comparison is fair.
-Run [7] is the only missing run needed to complete the Mistral rows in the table.
+Run [9] is the only missing run needed to complete the Mistral rows in the table.
 
 ```bash
-# [7] No-graph baseline on GAIA_dedup  ← CRITICAL MISSING RUN
+# [9] No-graph baseline on GAIA_dedup  ← CRITICAL MISSING RUN
 CUDA_VISIBLE_DEVICES=3,4,5,6 python eval/run_eval_vllm.py \
     --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
     --data_dir data/GAIA_dedup \
     --split GAIA_dedup \
     --output_dir outputs/zero_shot2
 
-# [8] Causal-only graph
-CUDA_VISIBLE_DEVICES=3,4,5,6 python eval/run_eval_with_graph_vllm.py \
+# DONE [10] Causal-only graph
+CUDA_VISIBLE_DEVICES=4,5 python eval/run_eval_with_graph_vllm.py \
     --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
     --data_dir data --split GAIA_dedup \
     --causal_only \
+    --tensor_parallel_size 2 \
     --output_dir outputs/zero_shot2
 
-# [9] Causal-only + span index
+# DONE [11] Causal-only + span index
 CUDA_VISIBLE_DEVICES=3,4,5,6 python eval/run_eval_with_graph_vllm.py \
     --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
     --data_dir data --split GAIA_dedup \
     --causal_only --span_index \
+    --output_dir outputs/zero_shot2
+
+# [12] Extended graph (causal + correlation edges w>=0.2) + span index
+CUDA_VISIBLE_DEVICES=4,5 python eval/run_eval_graph_inject_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --data_dir data --split GAIA_dedup \
+    --causal_only --corr_threshold 0.2 --span_index \
+    --tensor_parallel_size 2 \
     --output_dir outputs/zero_shot2
 ```
 
@@ -129,12 +153,15 @@ Matching pairs (zero_shot → zero_shot2):
 | Gemini GAIA no-graph | 0.3951 | TBD |
 | Gemini GAIA causal_only | 0.4277 | TBD |
 | Gemini GAIA causal_only + span_index | 0.4218 | TBD |
-| Gemini GAIA extended + span_index | 0.4326 | TBD |
+| Gemini GAIA graph_inject + span_index | 0.4326 | TBD |
 | Gemini SWE no-graph | *(incomplete, skip)* | TBD |
 | Gemini SWE causal_only | 0.3118 | TBD |
+| Gemini SWE causal_only + span_index | TBD | TBD |
+| Gemini SWE graph_inject + span_index | TBD | TBD |
 | Mistral GAIA_dedup no-graph | *(missing, skip)* | TBD |
 | Mistral GAIA_dedup causal_only | 0.2896 | TBD |
 | Mistral GAIA_dedup causal_only + span_index | 0.3350 | TBD |
+| Mistral GAIA_dedup graph_inject + span_index | TBD | TBD |
 
 ---
 
@@ -143,17 +170,17 @@ Matching pairs (zero_shot → zero_shot2):
 ```
 GAIA (N=117):
 
-Model                         | No Graph | +Causal | +Causal+SI | +Ext+SI
-------------------------------|----------|---------|------------|--------
-Gemini-2.5-Flash              | mean±std | mean±std | mean±std | mean±std
-Mistral-Small-24B (GAIA_dedup)| mean±std | mean±std | mean±std | —
+Model                         | No Graph | +Causal | +Causal+SI | +GraphInject+SI
+------------------------------|----------|---------|------------|----------------
+Gemini-2.5-Flash              | mean±std | mean±std | mean±std  | mean±std
+Mistral-Small-24B (GAIA_dedup)| mean±std | mean±std | mean±std  | mean±std
 
 SWE Bench (N=31):
 
-Model                         | No Graph | +Causal
-------------------------------|----------|--------
-Gemini-2.5-Flash              | z2 only  | mean±std
+Model                         | No Graph | +Causal | +Causal+SI | +GraphInject+SI
+------------------------------|----------|---------|------------|----------------
+Gemini-2.5-Flash              | z2 only  | mean±std | mean±std  | mean±std
 ```
 
-SI = span_index | Ext = extended graph (causal + corr≥0.2)
+SI = span_index | GraphInject = two-pass graph inject (run_eval_graph_inject*.py, causal + corr≥0.2)
 For SWE no-graph: use zero_shot2 only (zero_shot run was incomplete).
