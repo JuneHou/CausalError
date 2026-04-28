@@ -150,7 +150,6 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o"):
         params = {
             "messages": [{"role": "user", "content": prompt}],
             "model": model,
-            "max_completion_tokens": 8000,
             "reasoning_effort": "high",
             "drop_params": True,
         }
@@ -160,7 +159,6 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o"):
             "model": model,
             "temperature": 0.0,
             "top_p": 1,
-            "max_completion_tokens": 8000,
             "reasoning_effort": None,
             "drop_params": True,
         }

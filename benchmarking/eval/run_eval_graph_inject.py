@@ -31,6 +31,7 @@ Outputs:
     and can be scored with the standard calculate_scores.py.
 """
 
+import math
 import os
 import re
 import sys
@@ -221,22 +222,37 @@ The trace to analyze:
 """
 
 
-def format_graph_guidance(edges: List[Tuple[str, str, float]]) -> str:
+def format_graph_guidance(edges: List[Tuple[str, str, float]],
+                           causal_only: bool = False) -> str:
     """Format graph edges as a guidance block for Pass 1 (same as run_eval_with_graph.py)."""
     if not edges:
         return ""
-    lines = [
-        "# Causal Error Patterns (data-driven, from prior trace analysis)",
-        "The following causal relationships between error types have been statistically observed.",
-        "When you identify an error of type A in the trace, actively look for errors of type B",
-        "in subsequent spans, as B has been found to causally follow A.",
-        "Higher strength values indicate stronger causal association.",
-        "",
-        "Format: [Source Error] → [Consequent Error]  (strength: X.XX)",
-        "",
-    ]
-    for src, dst, w in edges:
-        lines.append(f"  {src} → {dst}  (strength: {w:.2f})")
+    if causal_only:
+        lines = [
+            "# Causal Error Patterns (intervention-validated)",
+            "The following edges were validated via counterfactual patching experiments.",
+            "When you identify an error of type A in the trace, actively look for errors of type B,",
+            "as removing A causally reduces B's occurrence rate.",
+            "Higher values indicate stronger causal effect.",
+            "",
+            "Format: [Source Error] → [Consequent Error]  (causal effect: X.XX)",
+            "",
+        ]
+        for src, dst, w in edges:
+            lines.append(f"  {src} → {dst}  (causal effect: {w:.2f})")
+    else:
+        lines = [
+            "# Correlated Error Patterns (observational, precedence-filtered)",
+            "The following error pairs consistently co-occur with A preceding B across agent traces.",
+            "Score = geometric mean of P(B|A) and probability-raising delta P(B|A)−P(B|¬A).",
+            "When you identify an error of type A in the trace, consider also checking for error type B.",
+            "Higher values indicate stronger observational association.",
+            "",
+            "Format: [Source Error] → [Consequent Error]  (observational score: X.XX)",
+            "",
+        ]
+        for src, dst, w in edges:
+            lines.append(f"  {src} → {dst}  (observational score: {w:.2f})")
     lines.append("")
     return "\n".join(lines)
 
@@ -326,6 +342,7 @@ def load_graph_edges(
     with open(suppes_graph) as f:
         sg = json.load(f)
     suppes_by_key = {(e["a"], e["b"]): e["pr_delta"] for e in sg["edges"]}
+    suppes_edges = sg["edges"]
 
     if causal_only:
         if not causal_graph.exists():
@@ -336,11 +353,15 @@ def load_graph_edges(
         if causal_graph.exists():
             causal_keys = {(e[0], e[1]) for e in _parse_causal_graph(causal_graph, suppes_by_key)}
         edges = []
-        for (a, b), w in suppes_by_key.items():
-            if (a, b) in causal_keys or w >= corr_threshold:
-                edges.append((a, b, w))
+        for e in suppes_edges:
+            a, b = e["a"], e["b"]
+            if (a, b) in causal_keys or e["pr_delta"] >= corr_threshold:
+                edges.append((a, b, math.sqrt(e["p_b_given_a"] * e["pr_delta"])))
     else:
-        edges = [(a, b, w) for (a, b), w in suppes_by_key.items() if w >= threshold]
+        edges = [
+            (e["a"], e["b"], math.sqrt(e["p_b_given_a"] * e["pr_delta"]))
+            for e in suppes_edges if e["pr_delta"] >= threshold
+        ]
 
     edges.sort(key=lambda x: -x[2])
     return edges
@@ -381,6 +402,8 @@ def propagate_confidence(
 
 def parse_json_output(text: str) -> Optional[dict]:
     """Parse JSON from model output, stripping markdown fences and thinking blocks."""
+    if text is None:
+        return None
     text = text.strip()
     # Strip thinking/reasoning blocks (Gemini 2.5, Claude extended thinking)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
@@ -469,46 +492,53 @@ def build_span_index(trace_str: str) -> str:
 # LiteLLM calls
 # ---------------------------------------------------------------------------
 
-def _call_litellm(prompt: str, model: str, max_completion_tokens: int = 8000,
+def _call_litellm(prompt: str, model: str, max_completion_tokens: Optional[int] = None,
                   use_reasoning: bool = True) -> str:
     """Single litellm call with retry logic. Used for both Pass 1 and Pass 2.
 
     Pass 1 uses use_reasoning=True (thinking enabled, reasoning_effort='high').
     Pass 2 uses use_reasoning=False (no thinking, temperature=0.0) to avoid
     wasting token budget on reasoning when we only need concise JSON output.
+
+    max_completion_tokens defaults to None (no limit) so the model uses its
+    API default.  Pass an explicit value only when you need a hard cap.
     """
     messages = [{"role": "user", "content": prompt}]
     is_reasoning_model = (
         "o1" in model or "o3" in model or "o4" in model
         or "anthropic" in model or "gemini-2.5" in model
+        or "gpt-oss" in model
     )
     if is_reasoning_model and use_reasoning:
         # Reasoning models: no temperature/top_p; explicit reasoning_effort.
-        # This matches run_eval_with_graph.py's call_litellm() exactly.
         params = {
             "messages": messages, "model": model,
-            "max_completion_tokens": max_completion_tokens,
             "reasoning_effort": "high", "drop_params": True,
         }
     else:
         # Non-reasoning path: standard temperature=0 call.
-        # Used for Pass 2 (simpler task; avoid burning token budget on thinking)
-        # and for non-reasoning models.
-        # For Gemini 2.5, reasoning_effort="none" → thinkingBudget=0 (thinking disabled).
-        # Without this, Gemini 2.5 Flash defaults to ~8192 thinking tokens, consuming
-        # nearly the entire max_completion_tokens budget and truncating the JSON output.
-        re_effort = "none" if ("gemini-2.5" in model) else None
+        # For Gemini 2.5 Flash, reasoning_effort="none" → thinkingBudget=0 (thinking disabled).
+        # Gemini 2.5 Pro does NOT support thinkingBudget=0 — it must run in thinking mode.
+        re_effort = "none" if ("gemini-2.5-flash" in model) else None
         params = {
             "messages": messages, "model": model,
             "temperature": 0.0, "top_p": 1,
-            "max_completion_tokens": max_completion_tokens,
             "reasoning_effort": re_effort, "drop_params": True,
         }
+    if max_completion_tokens is not None:
+        params["max_completion_tokens"] = max_completion_tokens
     for attempt in range(3):
         try:
             response = completion(**params)
             time.sleep(6)  # free tier: 10 RPM = 1 req/6s minimum
-            return response.choices[0].message["content"]
+            content = response.choices[0].message["content"]
+            if content is None:
+                finish_reason = response.choices[0].finish_reason
+                raise RuntimeError(
+                    f"Model returned content=None (finish_reason={finish_reason!r}). "
+                    f"Check that '{model}' is handled as a reasoning model."
+                )
+            return content
         except RateLimitError:
             print(f"  Rate limit (attempt {attempt+1}/3): sleeping 60s for RPM window reset...")
             time.sleep(60)
@@ -614,8 +644,7 @@ def process_file(
                 span_index=span_index,
             )
             try:
-                p2_raw = _call_litellm(p2_prompt, model, max_completion_tokens=8000,
-                                       use_reasoning=False)
+                p2_raw = _call_litellm(p2_prompt, model, use_reasoning=False)
                 p2_parsed = parse_json_output(p2_raw)
                 if p2_parsed is None:
                     print(f"  [graph_inject] JSON parse FAILED for {trace_id}")
@@ -746,7 +775,7 @@ def main() -> None:
         print(f"    ... and {len(edges)-10} more")
 
     # Build graph guidance for Pass 1 (same as run_eval_with_graph.py)
-    graph_guidance = format_graph_guidance(edges)
+    graph_guidance = format_graph_guidance(edges, causal_only=args.causal_only)
 
     # ------------------------------------------------------------------
     # Output directory

@@ -17,6 +17,7 @@ Outputs are saved to:
 and can be scored with the standard calculate_scores.py.
 """
 
+import math
 import os
 import sys
 import glob
@@ -140,7 +141,7 @@ def load_graph_edges(
         with open(suppes_graph) as f:
             data = json.load(f)
         edges = [
-            (e["a"], e["b"], e["pr_delta"])
+            (e["a"], e["b"], math.sqrt(e["p_b_given_a"] * e["pr_delta"]))
             for e in data["edges"]
             if e["pr_delta"] >= threshold
         ]
@@ -149,25 +150,38 @@ def load_graph_edges(
     return edges
 
 
-def format_graph_guidance(edges: list[tuple[str, str, float]]) -> str:
-    """
-    Format Suppes edges as a concise guidance block for the LLM prompt.
-    """
+def format_graph_guidance(edges: list[tuple[str, str, float]],
+                           causal_only: bool = False) -> str:
+    """Format edges as a guidance block for the LLM prompt."""
     if not edges:
         return ""
 
-    lines = [
-        "# Causal Error Patterns (data-driven, from prior trace analysis)",
-        "The following causal relationships between error types have been statistically observed.",
-        "When you identify an error of type A in the trace, actively look for errors of type B",
-        "in subsequent spans, as B has been found to causally follow A.",
-        "Higher strength values indicate stronger causal association.",
-        "",
-        "Format: [Source Error] → [Consequent Error]  (strength: X.XX)",
-        "",
-    ]
-    for src, dst, w in edges:
-        lines.append(f"  {src} → {dst}  (strength: {w:.2f})")
+    if causal_only:
+        lines = [
+            "# Causal Error Patterns (intervention-validated)",
+            "The following edges were validated via counterfactual patching experiments.",
+            "When you identify an error of type A in the trace, actively look for errors of type B,",
+            "as removing A causally reduces B's occurrence rate.",
+            "Higher values indicate stronger causal effect.",
+            "",
+            "Format: [Source Error] → [Consequent Error]  (causal effect: X.XX)",
+            "",
+        ]
+        for src, dst, w in edges:
+            lines.append(f"  {src} → {dst}  (causal effect: {w:.2f})")
+    else:
+        lines = [
+            "# Correlated Error Patterns (observational, precedence-filtered)",
+            "The following error pairs consistently co-occur with A preceding B across agent traces.",
+            "Score = geometric mean of P(B|A) and probability-raising delta P(B|A)−P(B|¬A).",
+            "When you identify an error of type A in the trace, consider also checking for error type B.",
+            "Higher values indicate stronger observational association.",
+            "",
+            "Format: [Source Error] → [Consequent Error]  (observational score: X.XX)",
+            "",
+        ]
+        for src, dst, w in edges:
+            lines.append(f"  {src} → {dst}  (observational score: {w:.2f})")
 
     lines.append("")
     return "\n".join(lines)
@@ -320,6 +334,7 @@ def call_litellm(trace: str, graph_guidance: str, model: str = "openai/gpt-4o",
         or "o4" in model
         or "anthropic" in model
         or "gemini-2.5" in model
+        or "gpt-oss" in model
     ):
         params = {
             "messages": messages,
@@ -435,7 +450,7 @@ def main() -> None:
     print(f"Loading graph edges (causal_only={args.causal_only}) ...")
     edges = load_graph_edges(args.edge_threshold, causal_only=args.causal_only,
                              causal_graph=causal_graph_path, suppes_graph=suppes_graph_path)
-    graph_guidance = format_graph_guidance(edges)
+    graph_guidance = format_graph_guidance(edges, causal_only=args.causal_only)
     if args.causal_only:
         print(f"  {len(edges)} edges included (causal_only, from {causal_graph_path.name})")
     else:

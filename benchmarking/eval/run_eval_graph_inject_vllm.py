@@ -23,6 +23,7 @@ Outputs:
     and can be scored with the standard calculate_scores.py.
 """
 
+import math
 import os
 import re
 import sys
@@ -221,6 +222,7 @@ def load_graph_edges(
     with open(suppes_graph) as f:
         sg = json.load(f)
     suppes_by_key = {(e["a"], e["b"]): e["pr_delta"] for e in sg["edges"]}
+    suppes_edges = sg["edges"]
 
     if causal_only:
         if not causal_graph.exists():
@@ -230,32 +232,51 @@ def load_graph_edges(
         causal_keys: set = set()
         if causal_graph.exists():
             causal_keys = {(e[0], e[1]) for e in _parse_causal_graph(causal_graph, suppes_by_key)}
-        edges = [
-            (a, b, w) for (a, b), w in suppes_by_key.items()
-            if (a, b) in causal_keys or w >= corr_threshold
-        ]
+        edges = []
+        for e in suppes_edges:
+            a, b = e["a"], e["b"]
+            if (a, b) in causal_keys or e["pr_delta"] >= corr_threshold:
+                edges.append((a, b, math.sqrt(e["p_b_given_a"] * e["pr_delta"])))
     else:
-        edges = [(a, b, w) for (a, b), w in suppes_by_key.items() if w >= threshold]
+        edges = [
+            (e["a"], e["b"], math.sqrt(e["p_b_given_a"] * e["pr_delta"]))
+            for e in suppes_edges if e["pr_delta"] >= threshold
+        ]
 
     edges.sort(key=lambda x: -x[2])
     return edges
 
 
-def format_graph_guidance(edges: List[Tuple[str, str, float]]) -> str:
+def format_graph_guidance(edges: List[Tuple[str, str, float]],
+                           causal_only: bool = False) -> str:
     if not edges:
         return ""
-    lines = [
-        "# Causal Error Patterns (data-driven, from prior trace analysis)",
-        "The following causal relationships between error types have been statistically observed.",
-        "When you identify an error of type A in the trace, actively look for errors of type B",
-        "in subsequent spans, as B has been found to causally follow A.",
-        "Higher strength values indicate stronger causal association.",
-        "",
-        "Format: [Source Error] → [Consequent Error]  (strength: X.XX)",
-        "",
-    ]
-    for src, dst, w in edges:
-        lines.append(f"  {src} → {dst}  (strength: {w:.2f})")
+    if causal_only:
+        lines = [
+            "# Causal Error Patterns (intervention-validated)",
+            "The following edges were validated via counterfactual patching experiments.",
+            "When you identify an error of type A in the trace, actively look for errors of type B,",
+            "as removing A causally reduces B's occurrence rate.",
+            "Higher values indicate stronger causal effect.",
+            "",
+            "Format: [Source Error] → [Consequent Error]  (causal effect: X.XX)",
+            "",
+        ]
+        for src, dst, w in edges:
+            lines.append(f"  {src} → {dst}  (causal effect: {w:.2f})")
+    else:
+        lines = [
+            "# Correlated Error Patterns (observational, precedence-filtered)",
+            "The following error pairs consistently co-occur with A preceding B across agent traces.",
+            "Score = geometric mean of P(B|A) and probability-raising delta P(B|A)−P(B|¬A).",
+            "When you identify an error of type A in the trace, consider also checking for error type B.",
+            "Higher values indicate stronger observational association.",
+            "",
+            "Format: [Source Error] → [Consequent Error]  (observational score: X.XX)",
+            "",
+        ]
+        for src, dst, w in edges:
+            lines.append(f"  {src} → {dst}  (observational score: {w:.2f})")
     lines.append("")
     return "\n".join(lines)
 
@@ -477,7 +498,7 @@ def main():
     if len(edges) > 10:
         print(f"    ... and {len(edges)-10} more")
 
-    graph_guidance = format_graph_guidance(edges)
+    graph_guidance = format_graph_guidance(edges, causal_only=args.causal_only)
 
     # ------------------------------------------------------------------
     # Output directory
