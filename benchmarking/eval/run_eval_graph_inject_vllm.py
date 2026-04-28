@@ -235,13 +235,14 @@ def load_graph_edges(
         edges = []
         for e in suppes_edges:
             a, b = e["a"], e["b"]
-            if (a, b) in causal_keys or e["pr_delta"] >= corr_threshold:
-                edges.append((a, b, math.sqrt(e["p_b_given_a"] * e["pr_delta"])))
+            score = math.sqrt(e["p_b_given_a"] * e["pr_delta"])
+            if (a, b) in causal_keys or score >= corr_threshold:
+                edges.append((a, b, score))
     else:
-        edges = [
-            (e["a"], e["b"], math.sqrt(e["p_b_given_a"] * e["pr_delta"]))
-            for e in suppes_edges if e["pr_delta"] >= threshold
-        ]
+        for e in suppes_edges:
+            score = math.sqrt(e["p_b_given_a"] * e["pr_delta"])
+            if score >= threshold:
+                edges.append((e["a"], e["b"], score))
 
     edges.sort(key=lambda x: -x[2])
     return edges
@@ -455,10 +456,10 @@ def main():
     parser.add_argument("--causal_only",            action="store_true",
                         help="Use only the 13 CAPRI-AIC validated causal edges")
     parser.add_argument("--corr_threshold",         type=float, default=1.0,
-                        help="Include causal + Suppes edges with pr_delta >= this. "
+                        help="Include causal + Suppes edges with geomean >= this. "
                              "Set to 0.20 for extended graph. Ignored if --causal_only.")
-    parser.add_argument("--edge_threshold",         type=float, default=0.10,
-                        help="Min pr_delta for default (non-causal-only) Suppes mode.")
+    parser.add_argument("--edge_threshold",         type=float, default=0.20,
+                        help="Min geomean score sqrt(P(B|A)*PR_delta) for observational edges (non-causal-only mode).")
     parser.add_argument("--propagation_threshold",  type=float, default=0.10,
                         help="Min boosted score to trigger Pass 2 for a target category.")
     parser.add_argument("--span_index",             action="store_true", default=False,
@@ -489,10 +490,10 @@ def main():
         print(f"  {len(edges)} edges (causal_only)")
     elif args.corr_threshold < 1.0:
         graph_tag = f"causal_corr{args.corr_threshold}"
-        print(f"  {len(edges)} edges (causal + corr pr_delta>={args.corr_threshold})")
+        print(f"  {len(edges)} edges (causal + corr geomean>={args.corr_threshold})")
     else:
         graph_tag = f"suppes_t{args.edge_threshold}"
-        print(f"  {len(edges)} edges (pr_delta>={args.edge_threshold})")
+        print(f"  {len(edges)} edges (geomean>={args.edge_threshold})")
     for src, dst, w in edges[:10]:
         print(f"    {src} → {dst}  ({w:.3f})")
     if len(edges) > 10:

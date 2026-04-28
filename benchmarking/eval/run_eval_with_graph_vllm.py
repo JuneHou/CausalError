@@ -111,10 +111,11 @@ def load_graph_edges(causal_only: bool = False, threshold: float = 0.10,
             raise FileNotFoundError(f"{suppes_graph} not found")
         with open(suppes_graph) as f:
             data = json.load(f)
-        edges = [
-            (e["a"], e["b"], math.sqrt(e["p_b_given_a"] * e["pr_delta"]))
-            for e in data["edges"] if e["pr_delta"] >= threshold
-        ]
+        edges = []
+        for e in data["edges"]:
+            score = math.sqrt(e["p_b_given_a"] * e["pr_delta"])
+            if score >= threshold:
+                edges.append((e["a"], e["b"], score))
 
     edges.sort(key=lambda x: -x[2])
     return edges
@@ -304,8 +305,8 @@ def main():
                         help="Prepend compact span_id index to each prompt")
     parser.add_argument("--causal_only",            action="store_true", default=False,
                         help="Use only the 13 CAPRI-AIC validated causal edges")
-    parser.add_argument("--edge_threshold",         type=float, default=0.10,
-                        help="Min pr_delta to include Suppes edges (ignored if --causal_only)")
+    parser.add_argument("--edge_threshold",         type=float, default=0.20,
+                        help="Min geomean score sqrt(P(B|A)*PR_delta) for observational edges (ignored if --causal_only)")
     parser.add_argument("--causal_graph",           type=str,   default=None,
                         help=f"Path to capri_graph.json (default: {DEFAULT_CAUSAL_GRAPH})")
     parser.add_argument("--suppes_graph",           type=str,   default=None,
@@ -317,7 +318,7 @@ def main():
     edges = load_graph_edges(causal_only=args.causal_only, threshold=args.edge_threshold,
                              causal_graph=causal_graph, suppes_graph=suppes_graph)
     graph_guidance = format_graph_guidance(edges, causal_only=args.causal_only)
-    print(f"Loaded {len(edges)} edges ({'causal_only' if args.causal_only else f'pr_delta>={args.edge_threshold}'})")
+    print(f"Loaded {len(edges)} edges ({'causal_only' if args.causal_only else f'geomean>={args.edge_threshold}'})")
 
     model_tag = args.model.replace("/", "-")
     graph_tag = "graph_causal_only" if args.causal_only else f"graph_t{args.edge_threshold}"

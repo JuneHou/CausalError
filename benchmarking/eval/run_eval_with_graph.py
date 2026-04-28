@@ -77,8 +77,8 @@ def build_span_index(trace_str: str) -> str:
                 lines.append(f'    span_id "{csid}"  ({csname})')
     return "\n".join(lines)
 
-# Default pr_delta threshold — only Suppes edges at or above this are shown to the LLM.
-DEFAULT_EDGE_THRESHOLD = 0.10
+# Default geomean threshold — only Suppes edges with geomean score >= this are shown to the LLM.
+DEFAULT_EDGE_THRESHOLD = 0.20  # min geomean score sqrt(P(B|A)*PR_delta) for observational edges
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ def load_graph_edges(
       causal_only=True  — load intervention-validated causal edges from effect_edges.json
                           (or capri_graph.json as fallback). Weight = abs(delta).
       causal_only=False — load all Suppes edges from suppes_graph.json with
-                          pr_delta >= threshold. Weight = pr_delta.
+                          geomean >= threshold. Weight = geomean = sqrt(P(B|A)*PR_delta).
     """
     # Build pr_delta lookup for capri fallback
     pr_lookup: dict[tuple[str, str], float] = {}
@@ -140,11 +140,11 @@ def load_graph_edges(
             raise FileNotFoundError(f"{suppes_graph} not found")
         with open(suppes_graph) as f:
             data = json.load(f)
-        edges = [
-            (e["a"], e["b"], math.sqrt(e["p_b_given_a"] * e["pr_delta"]))
-            for e in data["edges"]
-            if e["pr_delta"] >= threshold
-        ]
+        edges = []
+        for e in data["edges"]:
+            score = math.sqrt(e["p_b_given_a"] * e["pr_delta"])
+            if score >= threshold:
+                edges.append((e["a"], e["b"], score))
 
     edges.sort(key=lambda x: -x[2])
     return edges
@@ -430,7 +430,7 @@ def main() -> None:
     parser.add_argument("--split",          type=str,   default="GAIA",
                         help="Dataset split: GAIA or SWE Bench")
     parser.add_argument("--edge_threshold", type=float, default=DEFAULT_EDGE_THRESHOLD,
-                        help="Minimum pr_delta to include Suppes edges (ignored if --causal_only)")
+                        help="Min geomean score sqrt(P(B|A)*PR_delta) for observational edges (ignored if --causal_only)")
     parser.add_argument("--causal_only",    action="store_true",
                         help="Use only the 13 CAPRI-AIC validated causal edges from capri_graph.json")
     parser.add_argument("--causal_graph",   type=str,   default=None,
@@ -454,7 +454,7 @@ def main() -> None:
     if args.causal_only:
         print(f"  {len(edges)} edges included (causal_only, from {causal_graph_path.name})")
     else:
-        print(f"  {len(edges)} edges included (pr_delta >= {args.edge_threshold}, from {suppes_graph_path.name})")
+        print(f"  {len(edges)} edges included (geomean >= {args.edge_threshold}, from {suppes_graph_path.name})")
     print()
     print("--- Graph guidance preview (first 10 edges) ---")
     for line in graph_guidance.splitlines()[:15]:
