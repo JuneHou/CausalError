@@ -5,216 +5,89 @@ Target directory for all new runs: `outputs/zero_shot2/`
 
 ---
 
-## Remaining: Gemini-2.5-Flash — GAIA_dedup (zero_shot2 run)
+## Observational Graph Threshold Experiments (geomean scoring)
 
-zero_shot/ has all 4 GAIA conditions. zero_shot2/ only has the no-graph baseline.
-Need the 3 graph conditions in zero_shot2/ to complete the averaging pair.
-
-```bash
-# [A] Causal-only graph
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-flash \
-    --split GAIA_dedup \
-    --causal_only \
-    --output_dir outputs/zero_shot2
-
-# [B] Causal-only + span index
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-flash \
-    --split GAIA_dedup \
-    --causal_only --span_index \
-    --output_dir outputs/zero_shot2
-
-# [C] Graph inject (causal + corr>=0.2) + span index
-python eval/run_eval_graph_inject.py \
-    --model gemini/gemini-2.5-flash \
-    --split GAIA_dedup \
-    --causal_only --span_index \
-    --output_dir outputs/zero_shot2
-```
-
----
-
-## New: Gemini-2.5-Pro — GAIA_dedup + SWE_Bench_dedup
-
-Run the two bookend conditions (no-graph and best graph) on both splits.
-This is the minimal set to establish whether Pro benefits from graph injection
-and how it compares to Flash. Add intermediate conditions only if results are
-surprising or if a full Pro row is needed in the main table.
-
-Model ID (litellm): `gemini/gemini-2.5-pro`
-
-### GAIA_dedup
-
-```bash
-# [P1] No-graph baseline
-python eval/run_eval.py \
-    --model gemini/gemini-2.5-pro \
-    --split GAIA_dedup \
-    --output_dir outputs/zero_shot2
-
-# [P2] Graph inject (causal-only) + span index  ← best condition
-python eval/run_eval_graph_inject.py \
-    --model gemini/gemini-2.5-pro \
-    --split GAIA_dedup \
-    --causal_only --span_index \
-    --output_dir outputs/zero_shot2
-```
-
-### SWE_Bench_dedup
-
-```bash
-# [P3] No-graph baseline
-python eval/run_eval.py \
-    --model gemini/gemini-2.5-pro \
-    --split SWE_Bench_dedup \
-    --output_dir outputs/zero_shot2
-
-# [P4] Graph inject (causal-only) + span index  ← best condition
-python eval/run_eval_graph_inject.py \
-    --model gemini/gemini-2.5-pro \
-    --split SWE_Bench_dedup \
-    --causal_only --span_index \
-    --output_dir outputs/zero_shot2
-```
-
-### Optional (if full Pro row needed in main table)
-
-```bash
-# [P5] GAIA_dedup causal-only
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-pro \
-    --split GAIA_dedup \
-    --causal_only \
-    --output_dir outputs/zero_shot2
-
-# [P6] GAIA_dedup causal-only + span index
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-pro \
-    --split GAIA_dedup \
-    --causal_only --span_index \
-    --output_dir outputs/zero_shot2
-
-# [P7] SWE_Bench_dedup causal-only
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-pro \
-    --split SWE_Bench_dedup \
-    --causal_only \
-    --output_dir outputs/zero_shot2
-
-# [P8] SWE_Bench_dedup causal-only + span index
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-pro \
-    --split SWE_Bench_dedup \
-    --causal_only --span_index \
-    --output_dir outputs/zero_shot2
-```
-
----
-
-## Observational Graph Threshold Experiments (new geomean scoring)
-
-The non-causal graph path now uses `score = sqrt(P(B|A) × PR_delta)` (geometric mean)
+The non-causal graph path uses `score = sqrt(P(B|A) × PR_delta)` (geometric mean)
 as both the injected edge weight and the filter criterion.
-Both MAST and TRAIL now use **geomean >= threshold** consistently for observational edges.
+Both MAST and TRAIL use **geomean >= threshold** consistently for observational edges.
 
 ### Edge landscape (from suppes_graph.json)
 
 | geomean threshold | N edges | Categories covered |
 |---|---|---|
 | causal_only (12 edges) | 12 | 11/20 |
+| >= 0.30 | ~15 | 12/20 |
 | >= 0.20 | 18 | 12/20 (+Environment Setup Errors) |
+| >= 0.15 | ~20 | 13/20 |
 | >= 0.10 (current default) | 21 | 13/20 (+Environment Setup Errors, +Task Orchestration) |
+| >= 0.05 | ~25 | 13/20 |
 
 7 categories are structurally uncoverable at any threshold (no co-occurrence data):
 Instruction Non-compliance, Tool Definition Issues, Rate Limiting,
 Service Errors, Resource Not Found, Resource Exhaustion, Timeout Issues.
 
-Recommended threshold: **geomean >= 0.20** (18 edges, 12/20 cats) as the primary
-experiment — strong associations only, analogous to MAST geomean >= 0.20.
-Also run geomean >= 0.10 as the full-coverage comparison (adds Task Orchestration
-at the cost of extra weak edges).
+### T-Obs-3 — Mistral GAIA_dedup, observational edges  ✓ done
 
-### T-Obs-1 — Gemini-Flash GAIA_dedup: +CG observational, two thresholds
-
-```bash
-# [O1a] +CG observational, geomean >= 0.20  ← primary
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-flash \
-    --split GAIA_dedup \
-    --edge_threshold 0.20 \
-    --output_dir outputs/zero_shot2
-
-# [O1b] +CG observational + span index, geomean >= 0.20
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-flash \
-    --split GAIA_dedup \
-    --edge_threshold 0.20 --span_index \
-    --output_dir outputs/zero_shot2
-
-# [O1c] +CG observational, geomean >= 0.10  ← full-coverage comparison
-python eval/run_eval_with_graph.py \
-    --model gemini/gemini-2.5-flash \
-    --split GAIA_dedup \
-    --edge_threshold 0.10 \
-    --output_dir outputs/zero_shot2
-```
-
-Expected output dirs (in `outputs/zero_shot2/`):
-- `outputs_gemini-gemini-2.5-flash-GAIA_dedup-graph_suppes_t0.2/`
-- `outputs_gemini-gemini-2.5-flash-GAIA_dedup-graph_suppes_t0.2_span_index/`
-- `outputs_gemini-gemini-2.5-flash-GAIA_dedup-graph_suppes_t0.1/`
+Both [O3b] (`+GI causal + corr ≥ 0.20 + span index`,
+W-F1 = 36.93) and [O3a] (`+CG observational, geomean ≥ 0.20`,
+W-F1 = 29.33 GAIA / 9.31 SWE) are scored. Numbers folded into
+`paper/ablation_graph_richness.tex` (Mistral row).
 
 ---
 
-### T-Obs-2 — Gemini-Flash GAIA_dedup: +GI mixed (causal + observational)
+## NEW: Threshold Sweep — graph-richness × context-budget plot
 
-TRAIL's graph inject scripts support `--corr_threshold` to combine validated
-causal edges with suppes edges above a secondary threshold.  This is the most
-powerful mode and has no MAST analog.
+Goal: characterise how W-F1 scales with the size of the injected graph,
+and identify the threshold at which context-overflow failures (drops in
+trace coverage `N`) start to dominate. Output is a 3-panel plot:
+W-F1 vs τ, `N` vs τ, and Pass-2 prompt tokens vs τ.
 
-```bash
-# [O2a] +GI causal + corr >= 0.20 + span index  ← recommended
-python eval/run_eval_graph_inject.py \
-    --model gemini/gemini-2.5-flash \
-    --split GAIA_dedup \
-    --corr_threshold 0.20 --span_index \
-    --output_dir outputs/zero_shot2
+### Sweep spec
 
-# [O2b] +GI observational-only, geomean >= 0.20
-python eval/run_eval_graph_inject.py \
-    --model gemini/gemini-2.5-flash \
-    --split GAIA_dedup \
-    --edge_threshold 0.20 \
-    --output_dir outputs/zero_shot2
-```
+- **Method**: `+GI+SI` only (two-pass; one-pass `+CG` is a separate ablation).
+- **Thresholds**: `{causal-only, 0.30, 0.20, 0.15, 0.10, 0.05}` — 6 points.
+- **Models** (priority order):
+  1. **GPT-oss-20B** — largest corr0.2 gain on GAIA (+9.75 W-F1) → tests upside.
+  2. **QwenLong-L1-32B** — only model with confirmed context fragility
+     (corr0.2 dir came back empty) → tests where context budget breaks.
+  3. *Optional:* **Gemma-3-27B-IT** — only model where corr0.2 *regresses*
+     (-4.31 GAIA, -2.41 SWE) → tests whether the regression is monotonic
+     in τ (graph too big) or specific to a single edge added at 0.20.
+- **Splits**: GAIA_dedup only. SWE-Bench `N≤22` is too noisy for curve shape.
+- **Total runs (priority 1+2)**: 2 models × 6 thresholds = 12 runs.
 
-Expected output dirs:
-- `outputs_gemini-gemini-2.5-flash-GAIA_dedup-graph_inject_causal_corr0.2_span_index/`
-- `outputs_gemini-gemini-2.5-flash-GAIA_dedup-graph_inject_suppes_t0.2/`
+### Driver script
 
----
-
-### T-Obs-3 — Mistral GAIA_dedup: +CG observational (geomean >= 0.20)
-
-Run only after T-Obs-1 confirms that t=0.20 is the right threshold for Flash.
-Mirrors the MAST T10 design (Mistral geomean >= 0.20).
+`eval/run_threshold_sweep.sh` runs all 6 thresholds for one
+(model, split) pair and triggers scoring at the end:
 
 ```bash
-# [O3a] +CG observational, geomean >= 0.20
-CUDA_VISIBLE_DEVICES=<gpus> python eval/run_eval_with_graph_vllm.py \
-    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
-    --split GAIA_dedup \
-    --edge_threshold 0.20 \
-    --output_dir outputs/zero_shot2
+# Usage: eval/run_threshold_sweep.sh <model> <split> [gpus] [output_dir] [backend]
 
-# [O3b] +GI causal + corr >= 0.20 + span index
-CUDA_VISIBLE_DEVICES=<gpus> python eval/run_eval_graph_inject_vllm.py \
-    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
-    --split GAIA_dedup \
-    --corr_threshold 0.20 --span_index \
-    --output_dir outputs/zero_shot2
+# [TS-1] GPT-oss-20B GAIA_dedup
+eval/run_threshold_sweep.sh openai/gpt-oss-20b GAIA_dedup 0,1
+
+# [TS-2] QwenLong-L1-32B GAIA_dedup
+#   NOTE: debug the t=0.20 failure first (empty output dir in outputs_corr/);
+#   if context overflow is the cause, the sweep itself will quantify it.
+eval/run_threshold_sweep.sh Tongyi-Zhiwen/QwenLong-L1-32B GAIA_dedup 2,3
+
+# [TS-3] (optional) Gemma-3-27B-IT GAIA_dedup
+eval/run_threshold_sweep.sh openai/gemma-3-27b-it GAIA_dedup 0,1
 ```
+
+The script writes per-threshold logs to
+`outputs/zero_shot2/_sweep_logs/<model>-<split>-t<τ>.log`,
+emits one `*-metrics.txt` per threshold, and runs
+`calculate_scores.py` at the end.
+
+### Plot
+
+After the sweep completes, parse W-F1 / Loc / Joint / `N` from the
+metrics files and plot τ on the x-axis (descending: causal-only on the
+left, 0.05 on the right). Three panels: W-F1, `N`, and median Pass-2
+prompt tokens (the third requires either logging in the inject script
+or post-hoc tokenisation of the saved prompts).
 
 ---
 
@@ -224,8 +97,6 @@ CUDA_VISIBLE_DEVICES=<gpus> python eval/run_eval_graph_inject_vllm.py \
 # From benchmarking/
 python eval/calculate_scores.py --results_dir outputs/zero_shot2
 ```
-
----
 
 ## Completed (for reference)
 
@@ -237,3 +108,49 @@ python eval/calculate_scores.py --results_dir outputs/zero_shot2
 | Flash SWE causal_only+SI, graph_inject+SI (zero_shot2/, 31 traces) | ✓ |
 | Mistral GAIA_dedup all 4 conditions (zero_shot2/) | ✓ |
 | Mistral SWE_Bench_dedup no-graph + graph_inject+SI (zero_shot2/) | ✓ |
+| Pro P1–P4 (GAIA_dedup + SWE_Bench_dedup, baseline + +GI+SI causal-only) | ✓ |
+| T-Obs-3 Mistral GAIA_dedup +GI corr≥0.20+SI and +CG suppes t=0.20 (both splits) | ✓ |
+| corr0.2 +GI+SI for {Mistral, Gemma, GPT-oss-120B, GPT-oss-20B} on GAIA+SWE (outputs_corr/) | ✓ |
+| suppes t=0.20 +CG for {Gemma, GPT-oss-120B, GPT-oss-20B} on GAIA (outputs_corr/) | ✓ |
+
+---
+
+## Gemini-2.5-Pro — optional one-pass conditions (NOT for ablation study)
+
+The ablation study (`paper/ablation_graph_richness.tex`) is scoped to
+open-source models only — Gemini Flash / Pro are not part of it.
+The conditions below remain listed only for the main results table,
+in case the paper later needs a full one-pass Pro row alongside the
+already-done P1–P4 (baseline + `+GI+SI` causal-only).
+
+Model ID (litellm): `gemini/gemini-2.5-pro`
+
+```bash
+# [P5] GAIA_dedup causal-only (one-pass +CG)
+python eval/run_eval_with_graph.py \
+    --model gemini/gemini-2.5-pro \
+    --split GAIA_dedup \
+    --causal_only \
+    --output_dir outputs/zero_shot2
+
+# [P6] GAIA_dedup causal-only + span index (+CG+SI)
+python eval/run_eval_with_graph.py \
+    --model gemini/gemini-2.5-pro \
+    --split GAIA_dedup \
+    --causal_only --span_index \
+    --output_dir outputs/zero_shot2
+
+# [P7] SWE_Bench_dedup causal-only (one-pass +CG)
+python eval/run_eval_with_graph.py \
+    --model gemini/gemini-2.5-pro \
+    --split SWE_Bench_dedup \
+    --causal_only \
+    --output_dir outputs/zero_shot2
+
+# [P8] SWE_Bench_dedup causal-only + span index (+CG+SI)
+python eval/run_eval_with_graph.py \
+    --model gemini/gemini-2.5-pro \
+    --split SWE_Bench_dedup \
+    --causal_only --span_index \
+    --output_dir outputs/zero_shot2
+```

@@ -726,7 +726,7 @@ def main() -> None:
                         help="Dataset split: GAIA or SWE Bench")
     parser.add_argument("--data_dir",       type=str,   default="data")
     parser.add_argument("--output_dir",     type=str,   default="outputs/zero_shot")
-    parser.add_argument("--max_workers",    type=int,   default=5)
+    parser.add_argument("--max_workers",    type=int,   default=1)
     parser.add_argument("--causal_only",    action="store_true",
                         help="Use only the 13 CAPRI-AIC validated causal edges")
     parser.add_argument("--corr_threshold", type=float, default=1.0,
