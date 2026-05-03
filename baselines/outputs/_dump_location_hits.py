@@ -27,7 +27,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
-DEFAULT_PRED = HERE / "outputs_mistralai-Mistral-Small-3.1-24B-Instruct-2503-GAIA-who_and_when_w2"
+DEFAULT_PRED = HERE / "outputs_gemini-gemini-2.5-pro-SWE_Bench_dedup-graph_inject_causal_only_span_index"
 
 PRED_DIR = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else DEFAULT_PRED
 _name_lower = PRED_DIR.name.lower()
