@@ -458,10 +458,12 @@ def parse_json_output(text: str) -> Optional[dict]:
                 return json.loads(candidate)
             except json.JSONDecodeError:
                 pass
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
+        decoder = json.JSONDecoder()
+        idx = text.find("{")
+        if idx != -1:
             try:
-                return json.loads(m.group())
+                obj, _ = decoder.raw_decode(text, idx)
+                return obj
             except json.JSONDecodeError:
                 pass
     return None
