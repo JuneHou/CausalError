@@ -1,0 +1,208 @@
+% ============================================================
+% BASELINE — Who&When adaptation for the TRAIL benchmark
+%
+% Two blocks:
+%   (1) main-text snippet: 1-2 sentences for the body of the paper
+%   (2) appendix block:    full methodological detail
+%
+% Source paper:
+%   Yin et al., "Which Agent Causes Task Failures and When?
+%   On Automated Failure Attribution of LLM Multi-Agent Systems"
+%   (ICML 2025 Spotlight; arXiv:2505.00212)
+%
+% Adapted code lives in:
+%   baselines/who_and_when/run_who_and_when_vllm.py
+% ============================================================
+
+
+% ---------- (1) MAIN-TEXT SNIPPET (1-2 sentences) -----------------
+
+\paragraph{Who\&When baselines.}
+We additionally compare against the all-at-once (\textsc{W1}) and
+step-by-step (\textsc{W2}) localization strategies of
+\citet{yin2025whoandwhen}, adapted from single-agent attribution to
+TRAIL's multi-label, span-level setting. We omit the binary-search
+variant (\textsc{W3}): its $\mathcal{O}(\log N)$ efficiency claim
+relies on a single-error assumption that is broken on TRAIL, where
+the multi-label re-design forces $\mathcal{O}(K\!\cdot\!N)$ leaf
+calls in the worst case and offers no compute saving over a
+\textsc{W2} sweep.
+
+
+% ---------- (2) APPENDIX BLOCK (full detail) ----------------------
+
+\section{Who\&When Adaptation Details}
+\label{app:whoandwhen_trail}
+
+\citet{yin2025whoandwhen} introduce three localization strategies
+for the failure-attribution problem on multi-agent systems:
+\textsc{W1} (all-at-once), \textsc{W2} (step-by-step), and
+\textsc{W3} (binary search). All three answer a single
+question --- \emph{which agent caused the failure, and at which
+step?} --- and assume exactly one responsible agent and one
+decisive step per trace, returning a single \texttt{(agent, step)}
+tuple. We adapt these strategies to TRAIL by remapping
+``\emph{who}'' (which agent) to ``\emph{what}'' (which leaf
+category from TRAIL's 19-class taxonomy) and ``\emph{when}'' (which
+step) to ``\emph{where}'' (which \texttt{span\_id} in the trace),
+while removing the single-error assumption so that the predictor
+can return $0$, $1$, or many \texttt{(category, span\_id)} pairs
+per trace. The adapted runner is
+\texttt{baselines/who\_and\_when/run\_who\_and\_when\_vllm.py};
+all variants emit the standard TRAIL output schema so the
+existing scorer (\texttt{eval/calculate\_scores.py}) is reused
+without modification.
+
+\paragraph{W1 --- All-at-Once.}
+The model receives the full trace in a single prompt that mirrors the
+original \textsc{W1} prompt structure: ``You are an AI assistant tasked
+with analyzing an AI agent execution trace when solving a real-world
+problem. The problem is: \{task\_description\}. \ldots Identify which
+\{categories\} are present, at which \{span\_id\}, and explain the
+reason.'' Compared to \citet{yin2025whoandwhen} we (i) replace the
+``which agent caused the failure, at which step'' axis with TRAIL's
+19-leaf taxonomy on the category axis and \texttt{span\_id} on the
+location axis, (ii) remove the \texttt{errors[0]} truncation so the
+output is multi-label, and (iii) drop \texttt{ground\_truth} from the
+prompt because TRAIL is reference-free. The task description is kept
+verbatim from the original framing. One LLM call per trace.
+
+\paragraph{W2 --- Step-by-Step.}
+The original \textsc{W2} walks the trace one step at a time, asks a
+yes/no question at each step, and \emph{stops at the first ``yes''}.
+We remove the early-exit and replace the per-step prompt with a
+multi-label JSON request that may return zero or more categories
+per step; otherwise the prompt body, the task description, and the
+original's ``\emph{Note: avoid being overly critical \ldots focus on
+errors that clearly derail the process}'' calibration sentence are
+retained verbatim from \citet{yin2025whoandwhen}. Per-step
+predictions are aggregated by deduplicating
+\texttt{(category, span\_id)} pairs across the full sweep, with
+\texttt{span\_id} validation against the trace's span table. The
+sweep covers every step-level span; the only stopping condition is
+context overflow --- the original Who\&When relies on a reactive
+API-failure bail-out (Azure OpenAI rejects the call), which is fine
+for short multi-agent chat histories but unreliable for longer TRAIL
+traces, so we add a proactive token-count check that records
+\texttt{context\_overflow\_at\_step\_$i$} in the per-trace metadata
+and ends the sweep at that point. This is a TRAIL-side safety belt
+with the same end-state behaviour as the original, not a methodological
+change. $N$ LLM calls per trace, where $N$ is the number of step-level
+spans actually scanned (median $\approx 8$ on GAIA).
+
+\paragraph{Why we omit W3.}
+The original \textsc{W3} is binary search: at each level the model
+is asked to choose between the upper and lower half (exactly one),
+recursing only into the chosen side until a leaf step is isolated.
+This procedure produces \emph{one} prediction in $\mathcal{O}(\log
+N)$ calls --- the entire reason \textsc{W3} is interesting in the
+single-error setting.
+TRAIL is multi-label: a label may occur in zero, one, or many spans,
+and \emph{both} halves of any interval can independently contain
+the target. A faithful multi-label adaptation must therefore (i)
+run a separate bisection per category and (ii) allow both halves
+to be positive at every level, recursing into all positive halves.
+The first change multiplies the call count by $|\mathcal{C}|=19$;
+the second eliminates the binary-search efficiency guarantee
+because in the worst case (label present in every span) the
+recursion enumerates all $N$ leaves with $\mathcal{O}(N)$
+intermediate splits, giving $\mathcal{O}(|\mathcal{C}| \cdot N)$
+calls --- strictly more expensive than \textsc{W2}'s
+$\mathcal{O}(N)$ sweep, with no remaining algorithmic motivation.
+We therefore include \textsc{W1} and \textsc{W2} as faithful
+adaptations of the Who\&When framework, and exclude \textsc{W3}
+on the grounds that its design hypothesis (sub-linear localization
+of a unique error) is incompatible with TRAIL's multi-label
+ground truth.
+
+\paragraph{Implementation notes.}
+All variants share the same JSON-extraction pipeline: a tolerant
+parser that strips reasoning tags
+(\texttt{<think>...</think>}/\texttt{<thinking>...</thinking>}),
+removes the gpt-oss Harmony channel markers
+(\texttt{assistantanalysis}/\texttt{commentary}/\texttt{final}),
+and falls back to a brace-balanced object extractor when strict
+\texttt{json.loads} fails. For reasoning models
+(QwenLong-L1-32B, gpt-oss, DeepSeek-R1, QwQ) the runner
+auto-bumps \texttt{max\_new\_tokens} from 8000 to 24000 because
+the hidden \texttt{<think>} chain consumes most of the budget
+before the answer block; without this lift the JSON is silently
+truncated mid-string and every prediction collapses to empty.
+A trailing rubric-scores call appends the five TRAIL evaluator
+scores (\textit{reliability}, \textit{security},
+\textit{instruction\_adherence}, \textit{plan\_optimization},
+\textit{overall}) so the scorer can compute Pearson-$r$
+correlations alongside W-F1, Loc, and Joint metrics.
+
+\paragraph{Faithfulness audit: divergences from the original prompts.}
+In prompting-based LLM-as-judge the \emph{prompt is the method}, so we
+catalogue every textual change between the original prompts of
+\citet{yin2025whoandwhen} (\texttt{Automated\_FA/Lib/utils.py}) and our
+TRAIL adaptation. Each change is either \textbf{forced} (an unavoidable
+consequence of the single$\to$multi remap and TRAIL's reference-free,
+JSON-ingesting output schema) or a \textbf{deviation} (a choice that goes
+beyond that remap). After the corrections described in this section,
+\textsc{W1} and \textsc{W2} retain only forced changes plus a single
+TRAIL-side adapter (the trailing rubric-scores call); \textsc{W3} is
+excluded from headline experiments and listed here only to support that
+exclusion.
+
+\begin{itemize}\setlength{\itemsep}{0.4em}
+
+\item \noindent\rule{\linewidth}{0.4pt}\\
+      \textbf{Aspect:}\enspace \textsc{W1}/\textsc{W2}: TRAIL 19-category taxonomy block\\
+      \textbf{Original W\&W:}\enspace absent (free-form ``identify the agent and the step'')\\
+      \textbf{Our adaptation:}\enspace full leaf-category taxonomy injected at prompt head\\
+      \textbf{Justified by single$\to$multi?:}\enspace \textbf{forced} --- categories are the multi-label output space\\
+      \rule{\linewidth}{0.4pt}
+
+\item \textbf{Aspect:}\enspace \textsc{W1}/\textsc{W2}: ground-truth answer (\texttt{ground\_truth})\\
+      \textbf{Original W\&W:}\enspace included; the original authors annotate that it ``should be removed if ground truth shouldn't be used''\\
+      \textbf{Our adaptation:}\enspace dropped\\
+      \textbf{Justified by single$\to$multi?:}\enspace \textbf{forced} --- TRAIL evaluation is reference-free; including it would be data leakage\\
+      \rule{\linewidth}{0.4pt}
+
+\item \textbf{Aspect:}\enspace \textsc{W1}/\textsc{W2}: output format\\
+      \textbf{Original W\&W:}\enspace free text (\texttt{Agent Name: \ldots Step Number: \ldots Reason: \ldots} or \texttt{1. Yes/No 2. Reason: \ldots})\\
+      \textbf{Our adaptation:}\enspace strict JSON schema with an \texttt{errors} array of \texttt{(category, location, evidence, description, impact)} entries\\
+      \textbf{Justified by single$\to$multi?:}\enspace \textbf{forced} --- multi-label output requires an array; the TRAIL scorer ingests JSON\\
+      \rule{\linewidth}{0.4pt}
+
+\item \textbf{Aspect:}\enspace \textsc{W2}: early exit on first ``yes''\\
+      \textbf{Original W\&W:}\enspace defining behaviour --- the loop terminates as soon as one error is localized\\
+      \textbf{Our adaptation:}\enspace removed; the sweep continues through every step-level span\\
+      \textbf{Justified by single$\to$multi?:}\enspace \textbf{forced} --- a single-error early exit cannot recover the remaining \texttt{(category, span\_id)} pairs\\
+      \rule{\linewidth}{0.4pt}
+
+\item \textbf{Aspect:}\enspace \textsc{W1}/\textsc{W2}: trailing rubric-scores LLM call\\
+      \textbf{Original W\&W:}\enspace absent (Who\&When predicts \texttt{(agent, step)} only; no rubric scores)\\
+      \textbf{Our adaptation:}\enspace one extra zero-shot call per trace populates the five TRAIL evaluator scores\\
+      \textbf{Justified by single$\to$multi?:}\enspace \textbf{deviation} (TRAIL-side adapter) --- needed for Pearson-$r$ correlations; isolated in a separate call so it does not contaminate the localization prompt\\
+      \rule{\linewidth}{0.4pt}
+
+\item \textbf{Aspect:}\enspace \textsc{W3}: scope of bisection\\
+      \textbf{Original W\&W:}\enspace single combined run for the (single) error\\
+      \textbf{Our adaptation:}\enspace 19 separate per-label runs (implemented but not used in headline experiments)\\
+      \textbf{Justified by single$\to$multi?:}\enspace \textbf{forced} for multi-label, but multiplies cost/behaviour by $|\mathcal{C}|=19$\\
+      \rule{\linewidth}{0.4pt}
+
+\item \textbf{Aspect:}\enspace \textsc{W3}: half-selection at each level\\
+      \textbf{Original W\&W:}\enspace pick exactly ONE of \{upper half, lower half\}\\
+      \textbf{Our adaptation:}\enspace both halves can be marked positive; recurse into both\\
+      \textbf{Justified by single$\to$multi?:}\enspace \textbf{deviation} --- algorithmically different from binary search; eliminates the $\mathcal{O}(\log N)$ guarantee and is the proximate reason \textsc{W3} is excluded from headline results\\
+      \rule{\linewidth}{0.4pt}
+
+\end{itemize}
+
+The earlier draft of this baseline contained five additional deviations
+(a span-index ``re-emphasize'' block in \textsc{W1}, a dropped task
+description in \textsc{W1} and \textsc{W2}, a missing
+``\emph{avoid being overly critical}'' calibration sentence in
+\textsc{W2}, an assistant-prefix prefill of \texttt{\{"errors":} in
+\textsc{W1}, and a $K{=}20$ hard cap on the number of spans scanned by
+\textsc{W2}). All five have been removed from the runner
+(\texttt{baselines/who\_and\_when/run\_who\_and\_when\_vllm.py}); the
+previous version is preserved at \texttt{old\_run\_who\_and\_when\_vllm.py}
+for diffing. The remaining changes are forced by the multi-label
+adaptation, with the trailing rubric-scores call as the only
+non-forced TRAIL-side adapter.

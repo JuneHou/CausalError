@@ -91,6 +91,92 @@ or post-hoc tokenisation of the saved prompts).
 
 ---
 
+---
+
+## Outstanding gaps in `paper/ablation_graph_richness.tex`
+
+Two cells in the TRAIL ablation table are not currently sourced from
+`benchmarking/outputs_corr/`. Both need verification / re-runs before
+the table can be locked.
+
+### [G1] Locate or re-run Mistral +CG (suppes $t{=}0.2$) for both splits
+
+The Mistral `+CG (suppes, t≥0.2)` row in
+`paper/ablation_graph_richness.tex` cites W-F1 = 29.33 (GAIA) and
+9.31 (SWE), but no metrics file under
+`benchmarking/outputs_corr/` matches the Mistral one-pass suppes
+condition. The TODO entry T-Obs-3 records this as done — likely
+written to a different output directory. Action:
+
+```bash
+# 1. Search for any Mistral suppes-t0.2 metrics file in the repo
+find . -type f -name "*Mistral*graph_suppes_t0.2*-metrics.txt" \
+       -o -name "*Mistral*-graph-codename-t0.2*-metrics.txt" 2>/dev/null
+
+# 2. If none found, re-run from benchmarking/ (one-pass +CG, suppes t=0.2)
+python eval/run_eval_with_graph_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split GAIA_dedup \
+    --edge_threshold 0.2 \
+    --output_dir outputs_corr
+
+python eval/run_eval_with_graph_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split SWE_Bench_dedup \
+    --edge_threshold 0.2 \
+    --output_dir outputs_corr
+
+# 3. Score
+python eval/calculate_scores.py --results_dir outputs_corr
+```
+
+### [G2] Re-run QwenLong-L1-32B corr0.2 (+GI+SI) on both splits
+
+The QwenLong corr0.2 dir
+(`outputs_corr/outputs_Tongyi-Zhiwen-QwenLong-L1-32B-GAIA_dedup-graph_t0.2_span_index/`)
+exists but is empty (0 outputs). Confirmed root cause: the corr-ablation
+script `eval/run_eval_graph_inject_vllm.py` reuses the same buggy
+JSON parser as the Who&When baseline runner — no Harmony stripping, no
+balanced-brace JSON extractor, no open-`<think>` recovery, and no
+reasoning-model `max_tokens` bump. QwenLong's reasoning chain blows past
+`max_new_tokens`, the JSON is truncated mid-string, and `parse_json_output`
+returns `None` for every trace. Action (in order):
+
+```bash
+# 1. Port the same 3 fixes from baselines/who_and_when/run_who_and_when_vllm.py
+#    into benchmarking/eval/run_eval_graph_inject_vllm.py:
+#      (a) _strip_harmony helper
+#      (b) _balanced_json_object helper used by parse_json_output
+#      (c) auto-bump max_new_tokens 8000 -> 24000 for reasoning models
+#          matching r"(qwenlong|-l1-|gpt-oss|deepseek-r1|qwq)"
+
+# 2. Re-run from benchmarking/ once parser is fixed
+CUDA_VISIBLE_DEVICES=2,3 python eval/run_eval_graph_inject_vllm.py \
+    --model Tongyi-Zhiwen/QwenLong-L1-32B \
+    --split GAIA_dedup \
+    --causal_only --corr_threshold 0.2 --span_index \
+    --tensor_parallel_size 2 --max_model_len 32768 \
+    --output_dir outputs_corr
+
+CUDA_VISIBLE_DEVICES=2,3 python eval/run_eval_graph_inject_vllm.py \
+    --model Tongyi-Zhiwen/QwenLong-L1-32B \
+    --split SWE_Bench_dedup \
+    --causal_only --corr_threshold 0.2 --span_index \
+    --tensor_parallel_size 2 --max_model_len 32768 \
+    --output_dir outputs_corr
+
+# 3. Score
+python eval/calculate_scores.py --results_dir outputs_corr
+```
+
+Note: gpt-oss runs in `outputs_corr/` are non-empty and produced
+non-trivial W-F1, suggesting the parser bug only catastrophically breaks
+reasoning models (long `<think>` chains that exceed the token budget).
+For gpt-oss the Harmony channel leakage may still be silently degrading
+quality — worth re-running them after the parser fix to quantify.
+
+---
+
 ## Scoring
 
 ```bash
