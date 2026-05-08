@@ -156,6 +156,7 @@ Based on this trace, please predict the following:
 1. For each error category from the 19 categories above that is present in the trace, the exact category name. Only include the final subcategories of the taxonomy (i.e. "Resource Not Found" and not "API Issues" or "System Execution Errors"). Zero, one, or multiple categories may be present. If no categories are clearly present, return an empty list.
 2. The span_id where each predicted error first occurs (use the exact hex string copied from the trace).
 3. A brief evidence quote and one-sentence reason for each predicted error.
+4. The impact severity for each predicted error: HIGH, MEDIUM, or LOW.
 
 Please answer in strictly valid JSON with no markdown, no explanation, no preamble:
 
@@ -166,7 +167,7 @@ Please answer in strictly valid JSON with no markdown, no explanation, no preamb
             "location": "<exact span_id hex string>",
             "evidence": "<brief quote from the trace>",
             "description": "<one-sentence description>",
-            "impact": "HIGH"
+            "impact": "<HIGH, MEDIUM, or LOW>"
         }}
     ],
     "scores": []
@@ -189,13 +190,15 @@ Your task is to determine whether this most recent step (Step {step_num}) contai
 
 Note: Please avoid being overly critical in your evaluation. Focus on errors that clearly derail the process.
 
+For each error you find, also rate its impact severity as HIGH, MEDIUM, or LOW.
+
 Respond ONLY in strictly valid JSON:
 {{
   "step_id": {step_num},
   "span_id": "{span_id}",
   "has_error": true/false,
   "errors": [
-    {{"category": "<exact category name from the taxonomy>", "evidence": "<brief quote>", "description": "<one sentence>"}}
+    {{"category": "<exact category name from the taxonomy>", "evidence": "<brief quote>", "description": "<one sentence>", "impact": "<HIGH, MEDIUM, or LOW>"}}
   ]
 }}
 If no errors: {{"step_id": {step_num}, "span_id": "{span_id}", "has_error": false, "errors": []}}\
@@ -276,8 +279,9 @@ Content:
 {span_content}
 
 Is "{label}" present at this exact span?
+If present, also rate its impact severity as HIGH, MEDIUM, or LOW.
 Output strictly valid JSON:
-{{"label": "{label}", "present": true/false, "evidence": "...", "span_id": "{span_id}"}}\
+{{"label": "{label}", "present": true/false, "evidence": "...", "span_id": "{span_id}", "impact": "<HIGH, MEDIUM, or LOW>"}}\
 """
 
 
@@ -711,6 +715,7 @@ def run_w2(
             category = (err.get("category") or "").strip()
             evidence = err.get("evidence", "")
             description = err.get("description", f"Error at step {step_num} ({step_name}).")
+            impact = err.get("impact", "")
             pair_key = (category, span_id)
             if pair_key in seen_pairs:
                 continue
@@ -721,7 +726,7 @@ def run_w2(
                     "location": span_id,
                     "evidence": evidence,
                     "description": description,
-                    "impact": "HIGH",
+                    "impact": impact,
                 })
 
     # One trailing rubric-scores call (Option A). meta["calls"] is incremented
@@ -799,8 +804,9 @@ def run_w3(
             lines.append(entry["content"][:600])
         return "\n".join(lines)
 
-    def _bisect_label(label: str, spans: List[dict], global_offset: int) -> List[str]:
-        """Recursively bisect to find all spans where label is present. Returns list of span_ids."""
+    def _bisect_label(label: str, spans: List[dict], global_offset: int) -> List[Tuple[str, str]]:
+        """Recursively bisect to find all spans where label is present.
+        Returns list of (span_id, impact) pairs."""
         if not spans:
             return []
 
@@ -829,7 +835,8 @@ def run_w3(
                 return []
             parsed = parse_json_output(raw)
             if parsed and parsed.get("present") and entry["span_id"] in valid_span_ids:
-                return [entry["span_id"]]
+                impact = parsed.get("impact", "")
+                return [(entry["span_id"], impact)]
             return []
 
         mid = len(spans) // 2
@@ -876,8 +883,8 @@ def run_w3(
     all_errors = []
     seen_pairs: set = set()
     for label in TAXONOMY_LEAF_CATEGORIES:
-        span_ids = _bisect_label(label, ordered_spans, 0)
-        for sid in span_ids:
+        hits = _bisect_label(label, ordered_spans, 0)
+        for sid, impact in hits:
             pair_key = (label, sid)
             if pair_key not in seen_pairs:
                 seen_pairs.add(pair_key)
@@ -886,9 +893,9 @@ def run_w3(
                     "location": sid,
                     "evidence": "",
                     "description": f"{label} detected at span {sid} via bisection.",
-                    "impact": "HIGH",
+                    "impact": impact,
                 })
-        if span_ids:
+        if hits:
             meta["labels_found"].append(label)
 
     return {"errors": all_errors, "scores": []}, meta
