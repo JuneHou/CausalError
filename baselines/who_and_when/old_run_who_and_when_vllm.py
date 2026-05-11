@@ -20,15 +20,18 @@ Variants (each is a localization strategy adapted to multi-label TRAIL):
   w2   — Step-by-Step   : scan step_spans in order, no early exit, aggregate all
   w3   — Binary Search  : per-label recursive bisection over step_spans
 
-Changes from original Who&When (utils.py / local_model.py):
-  W1: prompt changed from "find single most critical error" to per-category
-      multi-label; removed errors[0] truncation.
-  W2: per-step prompt changed from single Yes/No to multi-label JSON list;
-      early-exit return removed; errors aggregated across all spans.
-  W3: bisect prompt changed to return lower_half_present + upper_half_present
-      (both can be true); classification changed to present:true/false per label;
-      algorithm changed from single-label bisection to per-label recursive
-      bisection (19 separate runs, recurse into all positive halves).
+Changes from original Who&When (utils.py), kept minimal so the baseline is
+a faithful single-error -> multi-error adaptation rather than a new method:
+  W1: single-error free-text answer -> multi-label JSON output keyed by
+      TRAIL's 19-category leaf taxonomy. Task description retained from the
+      original prompt; ground_truth dropped (TRAIL is reference-free).
+  W2: per-step Yes/No free text -> multi-label JSON list; early-exit on first
+      "Yes" removed (multi-label requires scanning all spans). Task
+      description and the original's "avoid being overly critical"
+      calibration sentence are retained verbatim. ground_truth dropped.
+  W3: implemented but excluded from headline experiments — the
+      O(log N) binary-search efficiency claim does not survive multi-label
+      adaptation. See paper/baseline_who_and_when.tex for the argument.
 
 Run commands (from benchmarking/, GPUs 1,2,6,7):
 
@@ -138,39 +141,28 @@ TAXONOMY_LEAF_CATEGORIES = [
 # ---------------------------------------------------------------------------
 
 W1_PROMPT_TEMPLATE = """\
-You are an expert evaluator of AI agent execution traces.
+You are an AI assistant tasked with analyzing an AI agent execution trace when solving a real-world problem.
+The problem is: {task_description}
 
 {taxonomy_block}
 
-{span_index_block}The agent execution trace:
+Identify which error categories from the taxonomy above are present in the trace, at which span, and explain the reason for each error.
+
+Here's the trace:
 
 {trace}
 
-This is a multi-label task. Zero, one, or multiple error types may be present in the trace.
-For EACH of the 19 error categories above, make an INDEPENDENT decision: is this error type
-present anywhere in the trace? Do NOT force a label if there is no clear evidence.
+Based on this trace, please predict the following:
+1. For each error category from the 19 categories above that is present in the trace, the exact category name. Only include the final subcategories of the taxonomy (i.e. "Resource Not Found" and not "API Issues" or "System Execution Errors"). Zero, one, or multiple categories may be present. If no categories are clearly present, return an empty list.
+2. The span_id where each predicted error first occurs (use the exact hex string copied from the trace).
+3. A brief evidence quote and one-sentence reason for each predicted error.
 
-For every category that IS present, output one entry with:
-- The exact category name (use EXACTLY one of the strings below — copy-paste, do not paraphrase)
-- The span_id where this error FIRST occurs (exact hex string from the trace)
-- A brief evidence quote
-- A one-sentence description
-
-Valid category names (copy EXACTLY — do not paraphrase or combine):
-Language-only, Tool-related, Poor Information Retrieval, Tool Output Misinterpretation,
-Incorrect Problem Identification, Tool Selection Errors, Formatting Errors,
-Instruction Non-compliance, Tool Definition Issues, Environment Setup Errors,
-Rate Limiting, Authentication Errors, Service Errors, Resource Not Found,
-Resource Exhaustion, Timeout Issues, Context Handling Failures,
-Resource Abuse, Goal Deviation, Task Orchestration
-
-Output strictly valid JSON with no markdown, no explanation, no preamble.
-Only include categories where your answer is YES:
+Please answer in strictly valid JSON with no markdown, no explanation, no preamble:
 
 {{
     "errors": [
         {{
-            "category": "<exact category name from list above>",
+            "category": "<exact category name from the taxonomy>",
             "location": "<exact span_id hex string>",
             "evidence": "<brief quote from the trace>",
             "description": "<one-sentence description>",
@@ -184,36 +176,26 @@ If no errors are present: {{"errors": [], "scores": []}}\
 """
 
 W2_STEP_PROMPT_TEMPLATE = """\
-You are an expert evaluator of AI agent execution traces.
+You are an AI assistant tasked with evaluating the correctness of each step in an ongoing AI agent execution aimed at solving a real-world problem. The problem being addressed is: {task_description}.
 
 {taxonomy_block}
 
-You are examining an agent execution trace step by step.
-
-Here is the execution so far, up to and including the CURRENT step (Step {step_num}):
-
+Here is the execution history up to the current step:
 {cumulative_spans}
 
-Your task: determine whether the CURRENT STEP (Step {step_num}: {step_name}) contains
-any errors from the taxonomy above. This is a multi-label task — a single step may have
-zero, one, or multiple error types. Predict an error only if the current step itself
-provides direct evidence.
+The most recent step (Step {step_num}, span_id "{span_id}") was: {step_name}.
 
-Valid category names (use EXACTLY as written — do not paraphrase):
-Language-only, Tool-related, Poor Information Retrieval, Tool Output Misinterpretation,
-Incorrect Problem Identification, Tool Selection Errors, Formatting Errors,
-Instruction Non-compliance, Tool Definition Issues, Environment Setup Errors,
-Rate Limiting, Authentication Errors, Service Errors, Resource Not Found,
-Resource Exhaustion, Timeout Issues, Context Handling Failures,
-Resource Abuse, Goal Deviation, Task Orchestration
+Your task is to determine whether this most recent step (Step {step_num}) contains any errors from the taxonomy above that could hinder the problem-solving process or lead to an incorrect solution. Zero, one, or multiple error categories from the taxonomy may be present in this single step. Please respond with the list of error categories present (or an empty list if none) and a clear explanation for your judgment.
 
-Output strictly valid JSON:
+Note: Please avoid being overly critical in your evaluation. Focus on errors that clearly derail the process.
+
+Respond ONLY in strictly valid JSON:
 {{
   "step_id": {step_num},
   "span_id": "{span_id}",
   "has_error": true/false,
   "errors": [
-    {{"category": "<exact category name>", "evidence": "<brief quote>", "description": "<one sentence>"}}
+    {{"category": "<exact category name from the taxonomy>", "evidence": "<brief quote>", "description": "<one sentence>"}}
   ]
 }}
 If no errors: {{"step_id": {step_num}, "span_id": "{span_id}", "has_error": false, "errors": []}}\
@@ -329,34 +311,6 @@ def _span_content(span: dict, max_len: int = 1500) -> str:
     if inp and isinstance(inp, str):
         return inp[:max_len]
     return "(no content)"
-
-
-def build_span_index(trace_str: str) -> str:
-    """Build compact span index (span_id → name) from step-level spans."""
-    try:
-        trace_data = json.loads(trace_str)
-    except Exception:
-        return ""
-    parsed = parse_trace_to_step_level(trace_data)
-    step_spans = parsed.get("step_spans", [])
-    if not step_spans:
-        return ""
-    lines = ["Span index (use these exact span_id hex values for the location field):"]
-    seen = set()
-    for entry in step_spans:
-        span = entry["span"]
-        sid = span.get("span_id")
-        sname = _span_name(span)
-        if sid and sid not in seen:
-            seen.add(sid)
-            lines.append(f'  span_id "{sid}"  ({sname})')
-        for child in span.get("child_spans") or []:
-            csid = child.get("span_id")
-            csname = _span_name(child)
-            if csid and csid not in seen:
-                seen.add(csid)
-                lines.append(f'    span_id "{csid}"  ({csname})')
-    return "\n".join(lines)
 
 
 def get_ordered_step_spans(trace_str: str) -> List[dict]:
@@ -504,10 +458,12 @@ def parse_json_output(text: str) -> Optional[dict]:
                 return json.loads(candidate)
             except json.JSONDecodeError:
                 pass
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
+        decoder = json.JSONDecoder()
+        idx = text.find("{")
+        if idx != -1:
             try:
-                return json.loads(m.group())
+                obj, _ = decoder.raw_decode(text, idx)
+                return obj
             except json.JSONDecodeError:
                 pass
     return None
@@ -626,7 +582,6 @@ def run_w1(
     tokenizer,
     max_model_len: int,
     max_new_tokens: int,
-    use_span_index: bool = True,
 ) -> Tuple[Optional[dict], dict]:
     """
     Single LLM call over the full trace, multi-label output, plus a separate
@@ -634,21 +589,17 @@ def run_w1(
     for reliability / security / instruction_adherence / plan_opt / overall.
     """
     ordered_spans = get_ordered_step_spans(trace_str)
-    span_index = build_span_index(trace_str) if use_span_index else ""
-    span_index_block = (span_index + "\n\n") if span_index else ""
+    task_desc = extract_task_description(trace_str)
     valid_span_ids = extract_span_ids(trace_str)
 
     trace_text = format_trace_for_prompt(ordered_spans)
 
     user_text = W1_PROMPT_TEMPLATE.format(
         taxonomy_block=TAXONOMY_BLOCK,
-        span_index_block=span_index_block,
+        task_description=task_desc,
         trace=trace_text,
     )
-    # Prefill the assistant response with '{"errors":' so the model is never
-    # tempted to emit EOS on the first token for traces it considers error-free.
-    ASST_PREFIX = '{"errors":'
-    prompt_text = apply_chat_template(tokenizer, user_text, assistant_prefix=ASST_PREFIX)
+    prompt_text = apply_chat_template(tokenizer, user_text)
 
     tok_len = len(tokenizer.encode(prompt_text, add_special_tokens=False))
     if tok_len + 8192 > max_model_len:
@@ -657,7 +608,7 @@ def run_w1(
     avail = max_model_len - tok_len
     sp = SamplingParams(temperature=0.0, max_tokens=min(max_new_tokens, avail))
     try:
-        raw = ASST_PREFIX + llm.generate([prompt_text], sp)[0].outputs[0].text
+        raw = llm.generate([prompt_text], sp)[0].outputs[0].text
     except Exception as e:
         return None, {"error": str(e)}
 
@@ -689,7 +640,6 @@ def run_w2(
     tokenizer,
     max_model_len: int,
     max_new_tokens: int,
-    max_spans: int = 20,
 ) -> Tuple[Optional[dict], dict]:
     """
     Scan step_spans in order, one call per span. No early exit — continue through
@@ -700,6 +650,10 @@ def run_w2(
     - Per-step prompt now asks for multi-label JSON list (zero or more categories)
     - Early-exit return on first Yes removed; all spans are scanned
     - Results deduplicated by (category, span_id) and returned together
+    The original "avoid being overly critical" calibration sentence and the
+    task description are retained verbatim. The sweep stops if the cumulative
+    prompt would exceed the model context budget (TRAIL-side safety belt;
+    semantically equivalent to the original's reactive API-failure bail-out).
     """
     ordered_spans = get_ordered_step_spans(trace_str)
     task_desc = extract_task_description(trace_str)
@@ -708,7 +662,6 @@ def run_w2(
     if not ordered_spans:
         return {"errors": [], "scores": []}, {"error": "no_step_spans"}
 
-    ordered_spans = ordered_spans[:max_spans]
     meta = {"calls": 0, "error": None}
     per_step_budget = min(4096, max(512, max_new_tokens // 8)) if max_new_tokens else 512
     # Pre-compute the full trace text now (before truncation creep in cumulative_text)
@@ -755,7 +708,7 @@ def run_w2(
             continue
 
         for err in parsed.get("errors", []):
-            category = _closest_category(err.get("category", ""))
+            category = (err.get("category") or "").strip()
             evidence = err.get("evidence", "")
             description = err.get("description", f"Error at step {step_num} ({step_name}).")
             pair_key = (category, span_id)
@@ -781,22 +734,6 @@ def run_w2(
     meta.update(scores_meta)
 
     return {"errors": all_errors, "scores": scores}, meta
-
-
-# ---------------------------------------------------------------------------
-# Category normalization helper
-# ---------------------------------------------------------------------------
-
-def _closest_category(raw: str) -> str:
-    """Snap a free-form category string to the nearest TRAIL leaf category."""
-    raw_clean = raw.strip().lower().replace(" ", "")
-    for cat in TAXONOMY_LEAF_CATEGORIES:
-        if raw_clean == cat.lower().replace(" ", ""):
-            return cat
-    for cat in TAXONOMY_LEAF_CATEGORIES:
-        if raw_clean in cat.lower().replace(" ", "") or cat.lower().replace(" ", "") in raw_clean:
-            return cat
-    return raw.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -982,8 +919,6 @@ def main():
                              "(QwenLong / *-L1-* / gpt-oss / DeepSeek-R1) unless explicitly set.")
     parser.add_argument("--enforce_eager",          action="store_true", default=True)
     parser.add_argument("--no_enforce_eager",       dest="enforce_eager", action="store_false")
-    parser.add_argument("--w2_max_spans",           type=int,   default=20,
-                        help="Max spans to scan in W2 before giving up.")
     args = parser.parse_args()
 
     is_reasoning_model = bool(re.search(
@@ -1050,7 +985,6 @@ def main():
             output, meta = run_w2(
                 trace_str, llm, tokenizer,
                 args.max_model_len, args.max_new_tokens,
-                max_spans=args.w2_max_spans,
             )
         else:  # w3
             output, meta = run_w3(

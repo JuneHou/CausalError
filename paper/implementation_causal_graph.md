@@ -112,7 +112,7 @@ Judge-2 (B-effect): 308 verdicts total — disappeared=174, unchanged=42, weaken
 | Tool-related → Goal Deviation | 16 | −0.500 | YES | disappeared=9, emerged=5, unchanged=2 |
 | Tool Selection Errors → Task Orchestration | 14 | −0.143 | **no** | emerged=5, disappeared=5, not\_observable=4 |
 
-Null distribution: mean = −0.519, std = 0.196 (1300 onset-permutation samples). Validated edges satisfy $\Delta < 0$ and $n \geq 1$; the threshold $\tau_\Delta = 0.15$ was calibrated against this null. *Tool Selection Errors → Task Orchestration* is the sole unvalidated edge ($\Delta = -0.143 < \tau_\Delta$, with near-equal disappeared/emerged counts indicating no consistent causal signal). The final validated graph therefore contains **12 directed edges**.
+Null distribution: mean = −0.519, std = 0.196 (1300 onset-permutation samples). The threshold $\tau_\Delta = 0.15$ requires a Δ of at least −0.15 — a substantively meaningful 15-point absolute reduction in $B$'s post-intervention occurrence rate — rather than a strict null-rejection criterion (the placebo null is shifted negative due to attenuation effects induced by the patch+rerun procedure itself; see `paper/appendix.md` §A.1). *Tool Selection Errors → Task Orchestration* is the sole unvalidated edge ($|\Delta| = 0.143 < \tau_\Delta$, with near-equal disappeared/emerged counts indicating no consistent causal signal). The final validated graph therefore contains **12 directed edges**.
 
 ### Summary Statistics
 
@@ -196,7 +196,7 @@ The $\text{do}(A{=}0)$ intervention protocol is applied to all 14 CAPRI-BIC edge
 | Fail to Ask Clarification → Information Withholding | 2 | $-0.500$ | Yes |
 | Task Derailment → Premature Termination | 7 | $-0.429$ | Yes |
 
-The placebo null distribution (1300 permutation samples) has mean $-0.032$ and standard deviation $0.392$, indicating that validated effects of $-0.08$ to $-1.00$ are not attributable to chance. The 7 unvalidated edges show positive or zero $\Delta$, most commonly due to the ``not\_observable'' outcome label dominating (171 of 325 total B-effect judgments), reflecting cases where the counterfactual continuation did not produce enough context to observe whether $B$ occurred.
+The placebo null distribution (1700 permutation samples on the AIC-pruned graph) has mean $-0.124$ and standard deviation $0.252$. The 12 unvalidated edges show effect sizes above the practical threshold $\tau_\Delta = 0.15$ — most commonly because the ``not\_observable'' outcome label dominated their B-effect judgments, reflecting cases where the counterfactual continuation did not produce enough context to determine whether $B$ occurred. As with TRAIL, the placebo null is centred negative because the patch+rerun procedure itself attenuates downstream errors regardless of the patched cause; we therefore interpret $\tau_\Delta$ as a minimum-effect-size criterion rather than a null-rejection cutoff (see `paper/appendix.md` §A.1).
 
 ### Cross-Benchmark Comparison
 
@@ -215,3 +215,5 @@ The two instantiations demonstrate the pipeline's generality across structurally
 | Dominant consequences | Resource Abuse, Goal Deviation | Unaware of Termination, Premature Termination |
 
 The choice of AIC vs. BIC reflects corpus size: AIC is preferred for the smaller GAIA+SWE corpus (148 traces) to retain more candidate edges, while BIC is appropriate for MAST's larger corpus (393 traces) where the complexity penalty is better calibrated. The structural difference in dominant error chains — low-level formatting cascades in single-agent traces vs. coordination failures propagating to termination errors in multi-agent dialogue — confirms that the pipeline surfaces meaningful benchmark-specific causal patterns rather than generic artifacts.
+
+See `paper/appendix.md` §A.1 for a clarifying note on how to interpret the intervention-validity threshold $\tau_\Delta$.

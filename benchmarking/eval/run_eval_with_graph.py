@@ -142,7 +142,7 @@ def load_graph_edges(
             data = json.load(f)
         edges = []
         for e in data["edges"]:
-            score = math.sqrt(e["p_b_given_a"] * e["pr_delta"])
+            score = math.sqrt(e["precedence"] * e["pr_delta"])
             if score >= threshold:
                 edges.append((e["a"], e["b"], score))
 
@@ -173,7 +173,7 @@ def format_graph_guidance(edges: list[tuple[str, str, float]],
         lines = [
             "# Correlated Error Patterns (observational, precedence-filtered)",
             "The following error pairs consistently co-occur with A preceding B across agent traces.",
-            "Score = geometric mean of P(B|A) and probability-raising delta P(B|A)−P(B|¬A).",
+            "Score = geometric mean of precedence P(A precedes B | both occur) and probability-raising delta P(B|A)−P(B|¬A).",
             "When you identify an error of type A in the trace, consider also checking for error type B.",
             "Higher values indicate stronger observational association.",
             "",

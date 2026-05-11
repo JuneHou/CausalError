@@ -152,7 +152,7 @@ def main() -> int:
     )
     parser.add_argument("--annotations_dir", default="processed_annotations_gaia")
     parser.add_argument("--causal_graph",
-                        default="data/trail_causal_outputs_AIC/capri_graph.json")
+                        default="data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json")
     parser.add_argument("--out_dir", default=None,
                         help="Directory to write eligible_traces.json. "
                              "Defaults to the same directory as --causal_graph.")

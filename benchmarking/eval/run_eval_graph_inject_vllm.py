@@ -88,6 +88,18 @@ Follow the taxonomy below carefully follow the instructions and provide the outp
 │        └── Task Orchestration (includes subtask coordination between agents and progress monitoring)\
 """
 
+TAXONOMY_CATEGORIES = [
+    "Language-only", "Tool-related",
+    "Poor Information Retrieval", "Tool Output Misinterpretation",
+    "Incorrect Problem Identification", "Tool Selection Errors",
+    "Formatting Errors", "Instruction Non-compliance",
+    "Tool Definition Issues", "Environment Setup Errors",
+    "Rate Limiting", "Authentication Errors", "Service Errors", "Resource Not Found",
+    "Resource Exhaustion", "Timeout Issues",
+    "Context Handling Failures", "Resource Abuse",
+    "Goal Deviation", "Task Orchestration",
+]
+
 PASS1_PROMPT_TEMPLATE = """\
 {taxonomy_block}
 {graph_guidance_block}\
@@ -216,6 +228,9 @@ def load_graph_edges(
     corr_threshold: float = 1.0,
     causal_graph: Path = DEFAULT_CAUSAL_GRAPH,
     suppes_graph: Path = DEFAULT_SUPPES_GRAPH,
+    random_edges: bool = False,
+    random_seed: int = 42,
+    random_n: int = 12,
 ) -> List[Tuple[str, str, float]]:
     if not suppes_graph.exists():
         raise FileNotFoundError(f"{suppes_graph} not found")
@@ -223,6 +238,15 @@ def load_graph_edges(
         sg = json.load(f)
     suppes_by_key = {(e["a"], e["b"]): e["pr_delta"] for e in sg["edges"]}
     suppes_edges = sg["edges"]
+
+    if random_edges:
+        import random as _rnd
+        suppes_keys = {(e["a"], e["b"]) for e in suppes_edges}
+        nodes = sorted(TAXONOMY_CATEGORIES)
+        candidate = [(a, b) for a in nodes for b in nodes if a != b and (a, b) not in suppes_keys]
+        rnd = _rnd.Random(random_seed)
+        sampled = rnd.sample(candidate, min(random_n, len(candidate)))
+        return [(a, b, 1.0) for a, b in sampled]
 
     if causal_only:
         if not causal_graph.exists():
@@ -235,12 +259,13 @@ def load_graph_edges(
         edges = []
         for e in suppes_edges:
             a, b = e["a"], e["b"]
-            score = math.sqrt(e["p_b_given_a"] * e["pr_delta"])
+            score = math.sqrt(e["precedence"] * e["pr_delta"])
             if (a, b) in causal_keys or score >= corr_threshold:
                 edges.append((a, b, score))
     else:
+        edges = []
         for e in suppes_edges:
-            score = math.sqrt(e["p_b_given_a"] * e["pr_delta"])
+            score = math.sqrt(e["precedence"] * e["pr_delta"])
             if score >= threshold:
                 edges.append((e["a"], e["b"], score))
 
@@ -249,10 +274,24 @@ def load_graph_edges(
 
 
 def format_graph_guidance(edges: List[Tuple[str, str, float]],
-                           causal_only: bool = False) -> str:
+                           causal_only: bool = False,
+                           random_edges: bool = False) -> str:
     if not edges:
         return ""
-    if causal_only:
+    if random_edges:
+        lines = [
+            "# Random Error Pattern Baseline (uncalibrated)",
+            "The following edges are sampled uniformly at random from directed category pairs",
+            "outside the Suppes-screened graph. They carry no probabilistic interpretation and",
+            "serve as a control for graph-structure ablations.",
+            "When you identify an error of type A in the trace, consider also checking for error type B.",
+            "",
+            "Format: [Source Error] → [Consequent Error]",
+            "",
+        ]
+        for src, dst, _ in edges:
+            lines.append(f"  {src} → {dst}")
+    elif causal_only:
         lines = [
             "# Causal Error Patterns (intervention-validated)",
             "The following edges were validated via counterfactual patching experiments.",
@@ -269,7 +308,7 @@ def format_graph_guidance(edges: List[Tuple[str, str, float]],
         lines = [
             "# Correlated Error Patterns (observational, precedence-filtered)",
             "The following error pairs consistently co-occur with A preceding B across agent traces.",
-            "Score = geometric mean of P(B|A) and probability-raising delta P(B|A)−P(B|¬A).",
+            "Score = geometric mean of precedence P(A precedes B | both occur) and probability-raising delta P(B|A)−P(B|¬A).",
             "When you identify an error of type A in the trace, consider also checking for error type B.",
             "Higher values indicate stronger observational association.",
             "",
@@ -454,12 +493,18 @@ def main():
     parser.add_argument("--enforce_eager",          action="store_true", default=True)
     parser.add_argument("--no_enforce_eager",       dest="enforce_eager", action="store_false")
     parser.add_argument("--causal_only",            action="store_true",
-                        help="Use only the 13 CAPRI-AIC validated causal edges")
+                        help="Use only the 12 intervention-validated causal edges")
     parser.add_argument("--corr_threshold",         type=float, default=1.0,
-                        help="Include causal + Suppes edges with geomean >= this. "
-                             "Set to 0.20 for extended graph. Ignored if --causal_only.")
+                        help="Include causal + Suppes edges with geomean sqrt(precedence*PR_delta) >= this. "
+                             "Set to 0.20/0.25/0.35 for the threshold sweep. Ignored if --causal_only.")
     parser.add_argument("--edge_threshold",         type=float, default=0.20,
-                        help="Min geomean score sqrt(P(B|A)*PR_delta) for observational edges (non-causal-only mode).")
+                        help="Min geomean score sqrt(precedence*PR_delta) for observational edges (non-causal-only mode).")
+    parser.add_argument("--random_edges",           action="store_true",
+                        help="Random-12 baseline: sample edges from full taxonomy minus Suppes graph.")
+    parser.add_argument("--random_seed",            type=int,   default=42,
+                        help="Seed for --random_edges sampling.")
+    parser.add_argument("--random_n",               type=int,   default=12,
+                        help="Number of random edges to sample (default 12, matches causal-only).")
     parser.add_argument("--propagation_threshold",  type=float, default=0.10,
                         help="Min boosted score to trigger Pass 2 for a target category.")
     parser.add_argument("--span_index",             action="store_true", default=False,
@@ -477,15 +522,22 @@ def main():
     # ------------------------------------------------------------------
     # Load graph
     # ------------------------------------------------------------------
-    print(f"Loading graph edges (causal_only={args.causal_only}, corr_threshold={args.corr_threshold}) ...")
+    print(f"Loading graph edges (causal_only={args.causal_only}, corr_threshold={args.corr_threshold}, "
+          f"random_edges={args.random_edges}) ...")
     edges = load_graph_edges(
         threshold=args.edge_threshold,
         causal_only=args.causal_only,
         corr_threshold=args.corr_threshold,
         causal_graph=causal_graph_path,
         suppes_graph=suppes_graph_path,
+        random_edges=args.random_edges,
+        random_seed=args.random_seed,
+        random_n=args.random_n,
     )
-    if args.causal_only:
+    if args.random_edges:
+        graph_tag = f"random{args.random_n}_seed{args.random_seed}"
+        print(f"  {len(edges)} random edges (seed={args.random_seed}, non-Suppes)")
+    elif args.causal_only:
         graph_tag = "causal_only"
         print(f"  {len(edges)} edges (causal_only)")
     elif args.corr_threshold < 1.0:
@@ -499,7 +551,9 @@ def main():
     if len(edges) > 10:
         print(f"    ... and {len(edges)-10} more")
 
-    graph_guidance = format_graph_guidance(edges, causal_only=args.causal_only)
+    graph_guidance = format_graph_guidance(
+        edges, causal_only=args.causal_only, random_edges=args.random_edges,
+    )
 
     # ------------------------------------------------------------------
     # Output directory

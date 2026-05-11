@@ -44,13 +44,9 @@ $$\hat{E}_{+\text{GI}} = \mathcal{J}\!\left(\,\text{prompt}(\mathcal{C},\, \text
 
 Because the graph is injected globally and identically for every trace, this method is **static**: the graph context does not condition on what errors have already been found in $T$.
 
-#### Edge weighting and observational extension ($w_{AB}$)
+#### Edge weighting
 
-For the causal-only configuration, $w_{AB}$ is the counterfactually estimated effect $|\Delta(A\!\to\!B)|$ from the intervention validation stage. For ablation conditions that extend $\mathcal{E}_C$ to **observational Suppes-screened edges** (denoted `corr ≥ τ` in the results), no intervention estimate is available, so each edge is weighted by the geometric mean of its two surviving Suppes signals,
-$$w_{AB} \;=\; \sqrt{\,P(B \mid A)\;\cdot\;\Delta\text{PR}(A\!\to\!B)\,},\qquad \Delta\text{PR} = P(B\mid A) - P(B\mid \neg A),$$
-and the same quantity is used both as the filter ($w_{AB} \geq \tau$) and as the weight shown to the judge in the guidance block. The third Suppes signal — temporal precedence $P(A\text{ precedes }B\mid \text{both occur})$ — is enforced upstream as a hard cutoff during Suppes screening (cf. §3) and therefore does not appear in $w_{AB}$. Precedence is treated as a binary directional gate at construction time rather than as a graded factor in $w_{AB}$, because it answers *which way the edge points* rather than *how strong the association is* — once an edge has passed the precedence cutoff, additional precedence value carries no further ranking information about edge strength.
-
-The geometric mean is preferred over an arithmetic mean here because the two factors live on substantially different scales across the screened edges ($P(B\mid A)$ ranges up to $\sim 0.8$, while $\Delta\text{PR}$ is concentrated below $0.2$); under arithmetic averaging, edges with a high but uninformative $P(B\mid A)$ — driven by a common consequent $B$ — would dominate the ranking and dilute the probability-raising signal that distinguishes spurious co-occurrence from association. The geometric form requires *both* factors to be non-trivial for an edge to receive a high weight, which matches the Suppes-style desideratum that an observational edge should reflect *both* a substantial conditional likelihood *and* a substantial probability-raising effect.
+For the causal-only configuration, $w_{AB}$ is the counterfactually estimated effect $|\Delta(A\!\to\!B)|$ from the intervention validation stage; ablation conditions that extend $\mathcal{E}_C$ to observational Suppes-screened edges use a geometric-mean score of the two graded Suppes signals (precedence and probability-raising) — see the graph-richness ablation appendix for the definition, threshold sweep, and rationale.
 
 ### 4.5 Dynamic Causal Graph Injection (+GI+SI, Complete Model)
 

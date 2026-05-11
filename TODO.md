@@ -1,149 +1,158 @@
 # EMNLP Main Table — Experiment TODO
 
 All commands run from `benchmarking/` unless noted.
-Target directory for all new runs: `outputs/zero_shot2/`
+Target directory for all new runs: `outputs/zero_shot2/` (or `outputs_thres/`
+for the threshold sweep).
 
 ---
 
-## Observational Graph Threshold Experiments (geomean scoring)
+## Ablation plan (post-stage-pipeline drop)
 
-The non-causal graph path uses `score = sqrt(P(B|A) × PR_delta)` (geometric mean)
-as both the injected edge weight and the filter criterion.
-Both MAST and TRAIL use **geomean >= threshold** consistently for observational edges.
+We are NOT running the stage-by-stage construction ablation
+(Suppes-only / CAPRI-pre-validation as separate graph variants).
+The remaining ablation set is three studies, each defending one paper claim:
 
-### Edge landscape (from suppes_graph.json)
+| # | Name | Defends | Status |
+|---|---|---|---|
+| **1** | **Span-Index Orthogonality** (`+SI` alone) | "+SI is orthogonal to the graph" (§4.3) — separates SI gain from graph gain | only QwenLong/GAIA-orig on disk; need open-source panel |
+| **2** | **Edge-Richness × Injection Architecture** (`paper/ablation_graph_richness.tex`) | "static `+CG` does not scale with edge count, but two-pass `+GI+SI` does" (§4.5) | mostly done at τ=0.20; outstanding cells listed under [A2-G1] / [A2-G2] / [A2-CGSI] below |
+| **3** | **Edge-Richness Threshold Sweep** (extension of Ablation 2) | "the graph-richness curve has a knee; chosen τ is on the right side of it" | in progress via `run_threshold_sweep.sh` over {0.18, 0.15, 0.05} on full open-source panel × both splits |
 
-| geomean threshold | N edges | Categories covered |
-|---|---|---|
-| causal_only (12 edges) | 12 | 11/20 |
-| >= 0.30 | ~15 | 12/20 |
-| >= 0.20 | 18 | 12/20 (+Environment Setup Errors) |
-| >= 0.15 | ~20 | 13/20 |
-| >= 0.10 (current default) | 21 | 13/20 (+Environment Setup Errors, +Task Orchestration) |
-| >= 0.05 | ~25 | 13/20 |
-
-7 categories are structurally uncoverable at any threshold (no co-occurrence data):
-Instruction Non-compliance, Tool Definition Issues, Rate Limiting,
-Service Errors, Resource Not Found, Resource Exhaustion, Timeout Issues.
-
-### T-Obs-3 — Mistral GAIA_dedup, observational edges  ✓ done
-
-Both [O3b] (`+GI causal + corr ≥ 0.20 + span index`,
-W-F1 = 36.93) and [O3a] (`+CG observational, geomean ≥ 0.20`,
-W-F1 = 29.33 GAIA / 9.31 SWE) are scored. Numbers folded into
-`paper/ablation_graph_richness.tex` (Mistral row).
+Existing on-disk artifacts to reuse:
+- causal-only +GI+SI (every model × both splits) — `outputs/zero_shot2/*-graph_inject_causal_only_span_index/`
+- corr 0.20 +GI+SI and +CG — moved into `outputs_thres/t0.20/` (was `outputs_corr/`)
+- Threshold sweep dirs land in `outputs_thres/t<τ>/` per the sweep script.
 
 ---
 
-## NEW: Threshold Sweep — graph-richness × context-budget plot
+## Ablation 1 — Span-Index Orthogonality (`+SI` alone)
 
-Goal: characterise how W-F1 scales with the size of the injected graph,
-and identify the threshold at which context-overflow failures (drops in
-trace coverage `N`) start to dominate. Output is a 3-panel plot:
-W-F1 vs τ, `N` vs τ, and Pass-2 prompt tokens vs τ.
+### Goal
 
-### Sweep spec
+Add a single `+SI` row per (model, split) to decompose:
+- SI-only gain  = `+SI` − Baseline
+- Graph-only gain = `+CG` − Baseline
+- Graph × SI interaction = `+GI+SI` − (`+SI` + `+CG` − Baseline)
 
-- **Method**: `+GI+SI` only (two-pass; one-pass `+CG` is a separate ablation).
-- **Thresholds**: `{causal-only, 0.30, 0.20, 0.15, 0.10, 0.05}` — 6 points.
-- **Models** (priority order):
-  1. **GPT-oss-20B** — largest corr0.2 gain on GAIA (+9.75 W-F1) → tests upside.
-  2. **QwenLong-L1-32B** — only model with confirmed context fragility
-     (corr0.2 dir came back empty) → tests where context budget breaks.
-  3. *Optional:* **Gemma-3-27B-IT** — only model where corr0.2 *regresses*
-     (-4.31 GAIA, -2.41 SWE) → tests whether the regression is monotonic
-     in τ (graph too big) or specific to a single edge added at 0.20.
-- **Splits**: GAIA_dedup only. SWE-Bench `N≤22` is too noisy for curve shape.
-- **Total runs (priority 1+2)**: 2 models × 6 thresholds = 12 runs.
+### Existing runs
 
-### Driver script
+Only one `+SI` run is on disk:
 
-`eval/run_threshold_sweep.sh` runs all 6 thresholds for one
-(model, split) pair and triggers scoring at the end:
+| Model | Split | Path | N | W-F1 / Loc / Joint |
+|---|---|---|---|---|
+| QwenLong-L1-32B | GAIA (orig) | `outputs/zero_shot/outputs_Tongyi-Zhiwen-QwenLong-L1-32B-GAIA_span_index/` | 117 | 16.77 / 11.80 / 3.24 |
+
+This row is on the **non-dedup** GAIA split, so it isn't directly comparable
+to the dedup main-results table. Treat as a sanity-check anchor, not a table
+cell.
+
+### Missing runs (open-source panel, dedup splits)
+
+Method: zero-shot baseline + `--span_index` (no graph). Use:
+- `eval/run_eval_vllm.py --span_index` for vLLM models.
+- `eval/run_eval.py --span_index` for litellm/Gemini.
+
+Output naming: `outputs_{model_tag}-{split}_span_index/`.
 
 ```bash
-# Usage: eval/run_threshold_sweep.sh <model> <split> [gpus] [output_dir] [backend]
+# === GAIA_dedup ===
+# [A1-G1] Mistral-Small-24B
+CUDA_VISIBLE_DEVICES=0,1 python eval/run_eval_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split GAIA_dedup --span_index \
+    --tensor_parallel_size 2 --max_model_len 108000 \
+    --output_dir outputs/zero_shot2
 
-# [TS-1] GPT-oss-20B GAIA_dedup
-eval/run_threshold_sweep.sh openai/gpt-oss-20b GAIA_dedup 0,1
+# [A1-G2] GPT-oss-120B
+CUDA_VISIBLE_DEVICES=0,1,2,3 python eval/run_eval_vllm.py \
+    --model openai/gpt-oss-120b --split GAIA_dedup --span_index \
+    --tensor_parallel_size 4 --output_dir outputs/zero_shot2
 
-# [TS-2] QwenLong-L1-32B GAIA_dedup
-#   NOTE: debug the t=0.20 failure first (empty output dir in outputs_corr/);
-#   if context overflow is the cause, the sweep itself will quantify it.
-eval/run_threshold_sweep.sh Tongyi-Zhiwen/QwenLong-L1-32B GAIA_dedup 2,3
+# [A1-G3] GPT-oss-20B
+CUDA_VISIBLE_DEVICES=0,1 python eval/run_eval_vllm.py \
+    --model openai/gpt-oss-20b --split GAIA_dedup --span_index \
+    --tensor_parallel_size 2 --output_dir outputs/zero_shot2
 
-# [TS-3] (optional) Gemma-3-27B-IT GAIA_dedup
-eval/run_threshold_sweep.sh openai/gemma-3-27b-it GAIA_dedup 0,1
+# [A1-G4] Gemma-3-27B-IT
+CUDA_VISIBLE_DEVICES=0,1 python eval/run_eval_vllm.py \
+    --model openai/gemma-3-27b-it --split GAIA_dedup --span_index \
+    --tensor_parallel_size 2 --output_dir outputs/zero_shot2
+
+# [A1-G5] QwenLong-L1-32B  (re-run on dedup, not orig)
+CUDA_VISIBLE_DEVICES=0,1 python eval/run_eval_vllm.py \
+    --model Tongyi-Zhiwen/QwenLong-L1-32B \
+    --split GAIA_dedup --span_index \
+    --tensor_parallel_size 2 --max_model_len 128000 \
+    --output_dir outputs/zero_shot2
+
+# === SWE_Bench_dedup ===  (same 5 models, --split SWE_Bench_dedup)
+# [A1-S1..S5] mirror the GAIA commands above with --split SWE_Bench_dedup
 ```
 
-The script writes per-threshold logs to
-`outputs/zero_shot2/_sweep_logs/<model>-<split>-t<τ>.log`,
-emits one `*-metrics.txt` per threshold, and runs
-`calculate_scores.py` at the end.
+Score with `python eval/calculate_scores.py --results_dir outputs/zero_shot2`.
 
-### Plot
-
-After the sweep completes, parse W-F1 / Loc / Joint / `N` from the
-metrics files and plot τ on the x-axis (descending: causal-only on the
-left, 0.05 on the right). Three panels: W-F1, `N`, and median Pass-2
-prompt tokens (the third requires either logging in the inject script
-or post-hoc tokenisation of the saved prompts).
+Closed-source Gemini Flash / Pro: optional — only Flash already has all four
+graph variants in Table 2; adding +SI to that single row is the cheapest
+demonstration of orthogonality.
 
 ---
 
----
+## Ablation 2 — Edge-Richness × Injection Architecture
 
-## Outstanding gaps in `paper/ablation_graph_richness.tex`
+Source table: `paper/ablation_graph_richness.tex` (currently three rows per
+model: `+CG (corr, t≥0.2)`, `+GI+SI (causal-only)`, `+GI+SI (corr ≥0.2)`).
 
-Two cells in the TRAIL ablation table are not currently sourced from
-`benchmarking/outputs_corr/`. Both need verification / re-runs before
-the table can be locked.
+### Outstanding cells
 
-### [G1] Locate or re-run Mistral +CG (suppes $t{=}0.2$) for both splits
+Three known gaps, all noted previously in this TODO and now grouped under
+Ablation 2:
 
-The Mistral `+CG (suppes, t≥0.2)` row in
-`paper/ablation_graph_richness.tex` cites W-F1 = 29.33 (GAIA) and
-9.31 (SWE), but no metrics file under
-`benchmarking/outputs_corr/` matches the Mistral one-pass suppes
-condition. The TODO entry T-Obs-3 records this as done — likely
-written to a different output directory. Action:
+#### [A2-G1] Mistral `+CG (corr t=0.2)` — locate or re-run on both splits
+
+The Mistral `+CG (corr, t≥0.2)` row in `paper/ablation_graph_richness.tex`
+cites W-F1 = 29.33 (GAIA) and 9.31 (SWE), but the source metrics file
+location was unclear after the move from `outputs_corr/` to
+`outputs_thres/t0.20/`. Confirm presence; re-run if missing.
 
 ```bash
-# 1. Search for any Mistral suppes-t0.2 metrics file in the repo
-find . -type f -name "*Mistral*graph_suppes_t0.2*-metrics.txt" \
-       -o -name "*Mistral*-graph-codename-t0.2*-metrics.txt" 2>/dev/null
+# 1. Search for any Mistral suppes/corr-t0.2 metrics file in the repo
+find . -type f \( -name "*Mistral*graph_suppes_t0.2*-metrics.txt" \
+                  -o -name "*Mistral*-graph_t0.2-metrics.txt" \) 2>/dev/null
 
-# 2. If none found, re-run from benchmarking/ (one-pass +CG, suppes t=0.2)
+# 2. If none found, re-run from benchmarking/ (one-pass +CG, edge_threshold=0.2)
 python eval/run_eval_with_graph_vllm.py \
     --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
     --split GAIA_dedup \
     --edge_threshold 0.2 \
-    --output_dir outputs_corr
+    --output_dir outputs_thres/t0.20
 
 python eval/run_eval_with_graph_vllm.py \
     --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
     --split SWE_Bench_dedup \
     --edge_threshold 0.2 \
-    --output_dir outputs_corr
+    --output_dir outputs_thres/t0.20
 
 # 3. Score
-python eval/calculate_scores.py --results_dir outputs_corr
+python eval/calculate_scores.py --results_dir outputs_thres/t0.20
 ```
 
-### [G2] Re-run QwenLong-L1-32B corr0.2 (+GI+SI) on both splits
+#### [A2-G2] QwenLong `+GI+SI (corr ≥ 0.2)` — finish GAIA partial coverage
 
-The QwenLong corr0.2 dir
-(`outputs_corr/outputs_Tongyi-Zhiwen-QwenLong-L1-32B-GAIA_dedup-graph_t0.2_span_index/`)
-exists but is empty (0 outputs). Confirmed root cause: the corr-ablation
-script `eval/run_eval_graph_inject_vllm.py` reuses the same buggy
-JSON parser as the Who&When baseline runner — no Harmony stripping, no
-balanced-brace JSON extractor, no open-`<think>` recovery, and no
-reasoning-model `max_tokens` bump. QwenLong's reasoning chain blows past
-`max_new_tokens`, the JSON is truncated mid-string, and `parse_json_output`
-returns `None` for every trace. Action (in order):
+Existing `outputs_thres/t0.20/outputs_openai-Tongyi-Zhiwen-...-graph_inject_suppes_t0.2_span_index/`
+covers only 84/117 GAIA traces (33 missing); the run was launched against
+a non-dedup file set. SWE-dedup is fully covered (31/31). The current paper
+table flags GAIA with $\dagger$ for partial coverage.
+
+Root cause to fix before re-running: the corr-ablation script
+`eval/run_eval_graph_inject_vllm.py` reuses the same JSON parser as the
+Who&When baseline runner — no Harmony stripping, no balanced-brace JSON
+extractor, no open-`<think>` recovery, and no reasoning-model `max_tokens`
+bump. QwenLong's reasoning chain blows past `max_new_tokens`, the JSON is
+truncated mid-string, and `parse_json_output` returns `None` for affected
+traces.
 
 ```bash
-# 1. Port the same 3 fixes from baselines/who_and_when/run_who_and_when_vllm.py
+# 1. Port the 3 fixes from baselines/who_and_when/run_who_and_when_vllm.py
 #    into benchmarking/eval/run_eval_graph_inject_vllm.py:
 #      (a) _strip_harmony helper
 #      (b) _balanced_json_object helper used by parse_json_output
@@ -154,26 +163,249 @@ returns `None` for every trace. Action (in order):
 CUDA_VISIBLE_DEVICES=2,3 python eval/run_eval_graph_inject_vllm.py \
     --model Tongyi-Zhiwen/QwenLong-L1-32B \
     --split GAIA_dedup \
-    --causal_only --corr_threshold 0.2 --span_index \
-    --tensor_parallel_size 2 --max_model_len 32768 \
-    --output_dir outputs_corr
+    --corr_threshold 0.2 --span_index \
+    --tensor_parallel_size 2 --max_model_len 128000 \
+    --output_dir outputs_thres/t0.20
 
 CUDA_VISIBLE_DEVICES=2,3 python eval/run_eval_graph_inject_vllm.py \
     --model Tongyi-Zhiwen/QwenLong-L1-32B \
     --split SWE_Bench_dedup \
-    --causal_only --corr_threshold 0.2 --span_index \
-    --tensor_parallel_size 2 --max_model_len 32768 \
-    --output_dir outputs_corr
+    --corr_threshold 0.2 --span_index \
+    --tensor_parallel_size 2 --max_model_len 128000 \
+    --output_dir outputs_thres/t0.20
 
 # 3. Score
-python eval/calculate_scores.py --results_dir outputs_corr
+python eval/calculate_scores.py --results_dir outputs_thres/t0.20
 ```
 
-Note: gpt-oss runs in `outputs_corr/` are non-empty and produced
+After the re-run produces a cleanly-named
+`outputs_Tongyi-Zhiwen-QwenLong-L1-32B-GAIA_dedup-graph_inject_causal_corr0.2_span_index/`
+folder, drop the $\dagger$ from the QwenLong corr0.2 row and remove the
+partial-coverage caption note.
+
+Note: gpt-oss runs in `outputs_thres/t0.20/` are non-empty and produced
 non-trivial W-F1, suggesting the parser bug only catastrophically breaks
-reasoning models (long `<think>` chains that exceed the token budget).
-For gpt-oss the Harmony channel leakage may still be silently degrading
-quality — worth re-running them after the parser fix to quantify.
+reasoning models (long `<think>` chains that exceed the token budget). For
+gpt-oss the Harmony channel leakage may still be silently degrading quality
+— worth re-running them after the parser fix to quantify.
+
+#### [A2-CGSI] Add `+CG+SI (corr t=0.2)` row across the open-source panel
+
+The current ablation table has `+CG` (no SI) and `+GI+SI` rows for corr0.2,
+but no `+CG+SI` cell. Adding it lets readers separate "graph contribution
+under one-pass injection" from "graph contribution under two-pass dynamic
+injection" while holding span-index fixed across rows. Use
+`run_eval_with_graph_vllm.py` with `--edge_threshold 0.2 --span_index`.
+
+```bash
+# Open-source panel × both splits, +CG+SI corr0.2.
+# Output dir naming: outputs_{model}-{split}-graph_t0.2_span_index/
+
+# Mistral
+python eval/run_eval_with_graph_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split GAIA_dedup --edge_threshold 0.2 --span_index \
+    --tensor_parallel_size 2 --output_dir outputs_thres/t0.20
+python eval/run_eval_with_graph_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split SWE_Bench_dedup --edge_threshold 0.2 --span_index \
+    --tensor_parallel_size 2 --output_dir outputs_thres/t0.20
+
+# Repeat for: openai/gemma-3-27b-it, openai/gpt-oss-120b (TP=4),
+# openai/gpt-oss-20b, Tongyi-Zhiwen/QwenLong-L1-32B (max_model_len=128000)
+```
+
+Score with `python eval/calculate_scores.py --results_dir outputs_thres/t0.20`.
+
+---
+
+## Ablation 3 — Edge-Richness Threshold Sweep
+
+Extends Ablation 2 by sweeping the corr / geomean threshold τ across more
+points so the graph-richness curve has a knee that justifies the chosen τ
+in `paper/ablation_graph_richness.tex`. Output is a 3-panel plot per
+(model, split): W-F1 vs τ, `N` vs τ, and Pass-2 prompt tokens vs τ.
+
+### Edge landscape (reference, from `suppes_graph.json`)
+
+Threshold score is `sqrt(precedence * pr_delta)` (the two graded Suppes
+statistics; geomean is monotone in each and independent across them).
+Edge counts are the **union with the 12 intervention-validated causal
+edges** (the inject code admits each Suppes edge that either passes the
+threshold or is in the causal set).
+
+| geomean τ | ∪ causal edges | Notes |
+|---|---|---|
+| causal_only (intervention-validated) | 12 | anchor; 11/20 categories |
+| ≥ 0.50 | 12 | only causal — redundant |
+| ≥ 0.45 | 13 | first observational edge enters |
+| ≥ 0.40 | 14 | |
+| ≥ 0.35 | 19 | knee: largest +5 jump |
+| ≥ 0.30 | 20 | |
+| ≥ 0.25 | 21 | mid-regime |
+| ≥ 0.20 | 25 | saturating end of sweep |
+| random-12 (seed 42) | 12 | null-graph control (non-Suppes pairs over full taxonomy) |
+
+The action lives in τ ∈ [0.35, 0.20]. Above 0.45 collapses to causal-only;
+below 0.20 adds the 2 remaining low-score Suppes edges.
+
+7 categories are structurally uncoverable in the Suppes graph (no
+co-occurrence data): Instruction Non-compliance, Tool Definition Issues,
+Rate Limiting, Service Errors, Resource Not Found, Resource Exhaustion,
+Timeout Issues. The random-12 baseline samples over the full 20-category
+taxonomy (so it can land on these uncoverable categories — by design,
+to avoid handing the random baseline domain knowledge).
+
+### Sweep spec
+
+- **Method**: `+GI+SI` only (two-pass; one-pass `+CG` is a separate ablation).
+- **Thresholds (3 sweep points + 1 baseline)**: `{0.35, 0.25, 0.20}` plus
+  the **random-12** null-graph control.
+  → corr edge counts **19 → 21 → 25** (monotone), plus **random-12** at
+  12 edges (count-matched to causal-only).
+  Causal-only stays as the main-table anchor row but is not re-run by
+  the sweep script (it's already on disk for every model × split).
+- **Score change vs prior sweep**: the threshold score moved from
+  `sqrt(P(B|A)*pr_delta)` to `sqrt(precedence*pr_delta)`. The previous
+  factors were not independent (P(B|A) appeared in both), so the geomean
+  did not have its intended "both signals must be substantial"
+  interpretation. The new score uses the two independent Suppes
+  statistics (precedence and probability-raising). **All prior corr-threshold
+  outputs under `outputs_thres/t0.20/` and `outputs_corr/` are
+  invalidated** and need re-running.
+- **Models — full open-source panel**:
+  1. **GPT-oss-20B** — largest corr0.2 gain on GAIA (+9.75 W-F1).
+  2. **GPT-oss-120B** — largest combined GAIA+SWE lift (+6.30 / +8.19).
+  3. **QwenLong-L1-32B** — context-fragility candidate; score the new
+     `outputs_corr/outputs_openai-Tongyi-Zhiwen-...-graph_inject_suppes_t0.2_span_index/`
+     dirs first to recover the existing τ=0.20 point.
+  4. **Mistral-Small-3.1-24B** — already has clean +6.17 GAIA at corr0.2.
+  5. **Gemma-3-27B-IT** — only regression model (-4.31 GAIA, -2.41 SWE);
+     tests whether the regression is monotonic in τ or driven by a
+     single bad edge.
+- **Splits**: **both** `GAIA_dedup` and `SWE_Bench_dedup`. SWE `N` is
+  noisy but corr0.2 lift is large for GPT-120B/20B — directionally informative.
+- **Reused runs**: `causal_only` is on disk for every (model, split);
+  `corr0.2` is on disk for every (model, split) except QwenLong (score
+  pending). The sweep script runs only the 3 new thresholds:
+  **3 × 5 models × 2 splits = 30 new runs**.
+
+### Driver script
+
+`eval/run_threshold_sweep.sh` (already updated to the 5-point list)
+runs every threshold for one (model, split) pair and triggers scoring
+at the end:
+
+```bash
+# Usage: eval/run_threshold_sweep.sh <model> <split> [gpus] [output_dir] [backend]
+
+# === GAIA_dedup ===
+# [TS-G1] GPT-oss-20B
+eval/run_threshold_sweep.sh openai/gpt-oss-20b           GAIA_dedup 0,1
+# [TS-G2] GPT-oss-120B
+eval/run_threshold_sweep.sh openai/gpt-oss-120b          GAIA_dedup 0,1,2,3
+# [TS-G3] QwenLong-L1-32B   (requires parser fix from [A2-G2])
+eval/run_threshold_sweep.sh Tongyi-Zhiwen/QwenLong-L1-32B GAIA_dedup 2,3
+# [TS-G4] Mistral-Small-24B
+eval/run_threshold_sweep.sh mistralai/Mistral-Small-3.1-24B-Instruct-2503 GAIA_dedup 0,1
+# [TS-G5] Gemma-3-27B-IT
+eval/run_threshold_sweep.sh openai/gemma-3-27b-it        GAIA_dedup 0,1
+
+# === SWE_Bench_dedup ===
+# [TS-S1] GPT-oss-20B
+eval/run_threshold_sweep.sh openai/gpt-oss-20b           SWE_Bench_dedup 0,1
+# [TS-S2] GPT-oss-120B
+eval/run_threshold_sweep.sh openai/gpt-oss-120b          SWE_Bench_dedup 0,1,2,3
+# [TS-S3] QwenLong-L1-32B
+eval/run_threshold_sweep.sh Tongyi-Zhiwen/QwenLong-L1-32B SWE_Bench_dedup 2,3
+# [TS-S4] Mistral-Small-24B
+eval/run_threshold_sweep.sh mistralai/Mistral-Small-3.1-24B-Instruct-2503 SWE_Bench_dedup 0,1
+# [TS-S5] Gemma-3-27B-IT
+eval/run_threshold_sweep.sh openai/gemma-3-27b-it        SWE_Bench_dedup 0,1
+```
+
+The script writes per-threshold logs to
+`outputs/zero_shot2/_sweep_logs/<model>-<split>-t<τ>.log`,
+emits one `*-metrics.txt` per threshold, and runs
+`calculate_scores.py` at the end. Re-running existing
+`causal_only` / `corr_threshold 0.20` thresholds is idempotent — the
+inner script overwrites prior outputs in the same dir.
+
+### Pre-flight
+
+1. **Score existing QwenLong corr0.2 dirs** so the τ=0.20 point is
+   available without re-running:
+   ```bash
+   python eval/calculate_scores.py --results_dir outputs_corr
+   ```
+   Targets: `outputs_openai-Tongyi-Zhiwen-...graph_inject_suppes_t0.2_span_index/`
+   GAIA (177 trace files) and SWE (63 trace files).
+2. **Reconcile edge-count discrepancy** (15 vs. 17/18 at τ=0.20). Dump
+   the edge set once with `--corr_threshold 0.20` to confirm the script
+   is unioning causal-validated edges with geomean-filtered ones, then
+   correct Table 6 caption in `paper/ablation_graph_richness.tex`.
+
+### Plot
+
+After the sweep completes, parse W-F1 / Loc / Joint / `N` from the
+metrics files and plot τ on the x-axis (descending: causal-only on the
+left, 0.05 on the right). Three panels per (model, split): W-F1, `N`,
+and median Pass-2 prompt tokens (the third requires either logging in
+the inject script or post-hoc tokenisation of the saved prompts).
+Optional 4th panel: false-positive rate (edges suggested but
+category-wrong) as a hallucination proxy at high-edge thresholds.
+
+---
+
+## Optional Ablation — BIC vs AIC capri criterion (skip if time-boxed)
+
+**Status: optional, likely deferred — only ~2 weeks until deadline.**
+
+The methodology paper says we use AIC for CAPRI structure learning (favors
+sensitivity over sparsity given the moderate trace count). Both repos are
+now coded to default AIC:
+
+- TRAIL: eval scripts already point at `data/trail_causal_outputs_full_gaia_swe_AIC/`
+  (criterion=AIC, 13 edges → 12 intervention-validated). Active artifact.
+- MAST: defaults flipped from BIC → AIC in `run_causal_pipeline.py`,
+  `CAPRI/3_capri_prune.py`, `CAPRI/4_bootstrap_stability.py`,
+  `visualize_graphs.py`, `workflow.md` (commit pending). On-disk
+  `outputs/capri_graph.json` was produced under BIC and is still the
+  artifact consumed by intervention validation; AIC artifacts will only
+  take effect after re-running the pipeline + intervention stage.
+
+If a reviewer asks "why AIC?", the defensible answer is the BIC artifact set:
+
+| Repo | BIC capri | AIC capri |
+|---|---|---|
+| TRAIL | 7 edges (in `trail_causal_outputs_BIC_old/`) | **13 edges** (active) |
+| MAST  | 14 edges (current `outputs/capri_graph.json`) | 23 edges (in `outputs/capri_graph_aic.json`) |
+
+So the *graph counts already exist* on both sides — the ablation only requires:
+
+### What would need to run
+
+1. **TRAIL — already partially defensible from on-disk BIC artifact**
+   - `data/trail_causal_outputs_BIC_old/capri_graph.json` (7 edges) is on disk.
+   - Would need: intervention validation re-run on the 7 BIC edges, then a
+     small panel run (1 model × 1 split, +GI+SI) under both BIC-validated
+     and AIC-validated edges to show the W-F1 delta.
+   - Compute: ~7 intervention runs (vs. 13 already done for AIC) +
+     1 inference run per (model, split) we want in the table.
+
+2. **MAST — full pipeline + intervention re-run**
+   - Re-run pipeline with `--criterion BIC` (already what the existing
+     `outputs/capri_graph.json` reflects) AND `--criterion AIC` to
+     produce both intervention edge sets cleanly.
+   - Run inference under each on the AG2 panel.
+
+### Recommendation given the deadline
+
+Ship as a 1-paragraph note in the implementation appendix citing the
+existing on-disk edge counts (TRAIL 7 vs 13; MAST 14 vs 23) and the
+methodology argument that AIC's lower complexity penalty is appropriate
+for moderate-N corpora. Only run the full ablation if a reviewer
+specifically demands it post-submission.
 
 ---
 
@@ -240,3 +472,31 @@ python eval/run_eval_with_graph.py \
     --causal_only --span_index \
     --output_dir outputs/zero_shot2
 ```
+
+
+Two modes now available for TRAIL:
+
+  # Default: only validated edges' nodes (11 nodes, 12 edges) — clean
+  python causal/graph/visualize_graphs.py \
+      --effect_edges  benchmarking/outputs/interventions_full_gaia_swe_merged/effect_edges.json \
+      --hierarchy     benchmarking/data/trail_causal_outputs_full_gaia_swe_AIC/hierarchy_levels.json \
+      --out_dir       figures/graph
+
+  # With --show_isolated --suppes: all 13 Suppes-universe categories (full taxonomy under test)
+  # Renders Environment Setup Errors + Task Orchestration as isolated nodes
+  python causal/graph/visualize_graphs.py \
+      --effect_edges  benchmarking/outputs/interventions_full_gaia_swe_merged/effect_edges.json \
+      --suppes        benchmarking/data/trail_causal_outputs_full_gaia_swe_AIC/suppes_graph.json \
+      --hierarchy     benchmarking/data/trail_causal_outputs_full_gaia_swe_AIC/hierarchy_levels.json \
+      --show_isolated \
+      --out_dir       figures/graph
+
+  The current figures/graph/graph_causal.png is regenerated with --show_isolated, so it shows all 13
+  Suppes-universe categories. Two are isolated:
+  - Environment Setup Errors — appeared in the Suppes graph (had observational co-occurrence) but no
+  edge survived intervention validation 
+  - Task Orchestration — same situation
+
+  This is informative: the figure now communicates "we tested 13 categories; intervention validation
+  kept causal edges between 11 of them." If you want the cleaner version without isolated nodes, drop
+  --show_isolated --suppes.

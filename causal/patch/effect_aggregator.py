@@ -229,7 +229,7 @@ def main() -> int:
     parser.add_argument("--patch_results",
                         default="outputs/interventions/patch_results.jsonl")
     parser.add_argument("--causal_graph",
-                        default="data/trail_causal_outputs_AIC/capri_graph.json")
+                        default="data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json")
     parser.add_argument("--out_dir", default="outputs/interventions")
     parser.add_argument("--threshold", type=float, default=0.15,
                         help="Δ < -threshold required to validate edge")

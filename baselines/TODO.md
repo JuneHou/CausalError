@@ -40,101 +40,111 @@ cells below are new.
 
 ---
 
-## 2. Coverage matrix — Who&When localization strategies
+## 2. Coverage matrix — Who&When prompts × graph injection
 
-Same six models × same two splits as Table 1. Each row in this matrix
-becomes a row in the Who&When ablation table in the paper.
+**Reframing (2026-05-11).** W1/W2 are not competing methods on TRAIL — they
+are alternative *prompt formats* over the same dataset; the TRAIL Baseline
+row is itself an adapted W&W prompt (single→multi-error). The matrix below
+therefore tests our method (+CG, +GI+SI) **on top of** each prompt format,
+demonstrating that the gain is from causal-graph injection and not from a
+lucky interaction with one specific prompt skeleton.
 
-Splits used **must match** the TRAIL-prompt rows so numbers are comparable:
-all open-source models use `GAIA_dedup` and `SWE_Bench_dedup`.
+Same five open-source models × same two splits as Table 1.
 
-| Model                    | W1 | W2 | W2+graph |
-|--------------------------|----|----|----------|
-| Mistral-Small-3.1-24B    | ✅ | ✅ | T        |
-| GPT-oss-120B             | T  | T  | T        |
-| GPT-oss-20B              | T  | T  | T        |
-| Gemma-3-27B-IT           | T  | T  | T        |
-| QwenLong-L1-32B          | T  | T  | T        |
+| Model                    | W1 | W2 | W1+CG | W2+CG | W1+GI+SI | W2+GI+SI |
+|--------------------------|----|----|-------|-------|----------|----------|
+| Mistral-Small-3.1-24B    | ✅ | ✅ | T     | T     | T        | T        |
+| GPT-oss-120B             | ✅ | ✅ | T     | T     | T        | T        |
+| GPT-oss-20B              | ✅ | ✅ | T     | T     | T        | T        |
+| Gemma-3-27B-IT           | ✅ | ✅ | T     | T     | T        | T        |
+| QwenLong-L1-32B          | ✅ | ✅ | T     | T     | T        | T        |
 
 `✅` already in `baselines/outputs/`. `T` = to-do.
 
-**Gemini-2.5-Flash is intentionally excluded** from Who&When (see §8
-on cost). Open-source-only matrix; Gemini stays in Table 1 as the
-TRAIL-prompt frontier reference.
+**W3 (binary search) intentionally excluded** from the main matrix
+(see §7). The runner still supports `--variant w3` for the appendix
+sanity probe.
 
-**W3 (binary search) is intentionally excluded** from the main matrix (see
-§7 on the methodology argument). Recommend running W3 graph-free on
-**Mistral GAIA_dedup only** as a one-cell sanity probe to cite empirical
-call counts in the paper footnote. The runner still supports
-`--variant w3` and `--variant w3_graph` for that sanity cell and any
-appendix follow-up.
+**Cost-staged priority ordering.** W1+graph is ~2× single-pass cost;
+W2+graph is ~(N+1)× ≈ 9–10×. So we stage:
 
-**Priority ordering.** Run in this order so the headline numbers land first:
-
-1. **Mistral-Small-3.1-24B** (already has W1/W2): W2+graph on `GAIA_dedup`,
-   then `SWE_Bench_dedup`. Mistral is the established open-source headline
-   model in Table 1. Optionally also run a one-shot W3 graph-free on
-   `GAIA_dedup` to record the empirical call-count blowup for the
-   methodology footnote.
-2. **GPT-oss-120B** and **Gemma-3-27B-IT** (full rows, dedup splits). Both
-   show large +GI+SI gains in Table 1, so the W2+graph ablation is most
-   informative here.
-3. **GPT-oss-20B** and **QwenLong-L1-32B** (full rows, dedup splits). Smaller
-   open-source models — fill in for completeness.
+1. **W1+CG** then **W1+GI+SI** on the full panel (cheap — ~2× per run).
+   This alone answers "does graph help on the cheap prompt format?" If
+   yes for ≥3/5 models on both splits, the headline robustness claim
+   is in.
+2. **W2+CG** then **W2+GI+SI** on the headline cell first
+   (Mistral GAIA_dedup), then on whichever 1–2 cells showed the largest
+   W1 gain. Skip the rest unless reviewer pressure demands them.
 
 Within each model, run in order:
-W1 → W2 → W3 → W2+graph → W3+graph
-(graph-free first; graph variants depend on no-graph numbers existing in
-the same table).
+`W1+CG → W1+GI+SI → W2+CG → W2+GI+SI`.
+Graph-free W1/W2 numbers are already on disk for all five models —
+no re-run needed.
 
 ---
 
 ## 3. Graph configuration
 
 Use the **same graph artifacts** as TRAIL +GI+SI in Table 1, so the
-localization-strategy ablation isolates exactly the bisection vs. holistic
-question with the same causal evidence:
-- `--causal_only` (13 CAPRI-AIC validated edges)
+prompt-robustness ablation isolates only the prompt-format axis:
+- `--causal_only` (13 CAPRI-AIC validated edges) is the default.
 - Graph paths default to
   `benchmarking/outputs/interventions_full_gaia_swe_merged/effect_edges.json`
   and `benchmarking/data/trail_causal_outputs_full_gaia_swe_AIC/suppes_graph.json`.
 
 Optionally also run the broader `--corr_threshold 0.20` graph for the
-two best-performing model+split cells (decided post-hoc, after the
-`--causal_only` numbers are in).
+two best-performing model+split cells (decided post-hoc).
 
 ---
 
 ## 4. Run commands
 
-Replace `${MODEL}` and `${SPLIT}` per cell. GPU count and
-`tensor_parallel_size` follow the same conventions as the TRAIL +GI+SI runs
-for that model.
+Replace `${MODEL}` and `${SPLIT}` per cell. Two runners live in
+`baselines/who_and_when/causal/`:
 
-### Graph-free W1 / W2
+- `run_who_and_when_with_graph_vllm.py` — **+CG (one-pass graph in prompt).**
+  Inserts the graph guidance block into the W1 single-call prompt, or into
+  every per-step W2 prompt.
+- `run_who_and_when_graph_inject_vllm.py` — **+GI+SI (two-pass dynamic
+  injection).** Pass 1 = vanilla W1/W2 (no graph); propagate detected
+  categories through the graph; Pass 2 = single trace-level targeted call
+  with filtered subgraph. Cost profile: W1 → 2 calls/trace; W2 → N+1
+  calls/trace (one Pass-2 call per trace, not per span).
+
+### Graph-free W1 / W2 (already done; reference only)
 ```bash
 # from baselines/who_and_when/
-python run_who_and_when_vllm.py \
-    --model ${MODEL} \
-    --split ${SPLIT} \
-    --variant w1 \
-    --max_model_len 131072
-
-python run_who_and_when_vllm.py \
-    --model ${MODEL} \
-    --split ${SPLIT} \
-    --variant w2 \
-    --max_model_len 32768
+python run_who_and_when_vllm.py --model ${MODEL} --split ${SPLIT} --variant w1 --max_model_len 131072
+python run_who_and_when_vllm.py --model ${MODEL} --split ${SPLIT} --variant w2 --max_model_len 32768
 ```
 
-### Graph-injected W2 (this PR)
+### Stage 1 — W1+CG and W1+GI+SI (cheap; full panel)
 ```bash
 # from baselines/who_and_when/causal/
-python run_who_and_when_causal_vllm.py \
-    --model ${MODEL} \
-    --split ${SPLIT} \
-    --variant w2_graph \
-    --causal_only \
+
+# W1 + CG (one call per trace)
+python run_who_and_when_with_graph_vllm.py \
+    --model ${MODEL} --split ${SPLIT} --variant w1 --causal_only \
+    --max_model_len 131072
+
+# W1 + GI+SI (two calls per trace)
+python run_who_and_when_graph_inject_vllm.py \
+    --model ${MODEL} --split ${SPLIT} --variant w1 --causal_only --span_index \
+    --max_model_len 131072
+```
+
+### Stage 2 — W2+CG and W2+GI+SI (expensive; selected cells)
+```bash
+# from baselines/who_and_when/causal/
+
+# W2 + CG (graph appears in every per-step call)
+python run_who_and_when_with_graph_vllm.py \
+    --model ${MODEL} --split ${SPLIT} --variant w2 --causal_only \
+    --max_model_len 32768
+
+# W2 + GI+SI (W2 sweep then 1 targeted trace-level pass)
+python run_who_and_when_graph_inject_vllm.py \
+    --model ${MODEL} --split ${SPLIT} --variant w2 --causal_only --span_index \
     --max_model_len 32768
 ```
 
@@ -142,51 +152,57 @@ python run_who_and_when_causal_vllm.py \
 ```bash
 cd baselines/who_and_when/causal
 
-# 1. W2 + graph — the headline new cell for Mistral
-CUDA_VISIBLE_DEVICES=1,2,6,7 python run_who_and_when_causal_vllm.py \
+# 1. W1 + CG — cheapest new cell; canary for whether the graph helps on W1 at all.
+CUDA_VISIBLE_DEVICES=1,2,6,7 python run_who_and_when_with_graph_vllm.py \
     --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
-    --split GAIA_dedup --variant w2_graph \
-    --causal_only \
-    --tensor_parallel_size 4 --gpu_memory_utilization 0.34 \
+    --split GAIA_dedup --variant w1 --causal_only \
+    --tensor_parallel_size 4 --gpu_memory_utilization 0.8 \
+    --max_model_len 131072
+
+# 2. W1 + GI+SI — confirms two-pass dynamic injection works on W1 prompt skeleton.
+CUDA_VISIBLE_DEVICES=1,2,6,7 python run_who_and_when_graph_inject_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split GAIA_dedup --variant w1 --causal_only --span_index \
+    --tensor_parallel_size 4 --gpu_memory_utilization 0.8 \
+    --max_model_len 131072
+
+# 3. W2 + GI+SI — headline cell from the previous plan; gates Stage 2.
+CUDA_VISIBLE_DEVICES=1,2,6,7 python run_who_and_when_graph_inject_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split GAIA_dedup --variant w2 --causal_only --span_index \
+    --tensor_parallel_size 4 --gpu_memory_utilization 0.8 \
     --max_model_len 32768
 ```
 
-After GAIA_dedup is complete, repeat with `--split SWE_Bench_dedup`.
-
-Optional methodology-footnote sanity probe (Mistral GAIA_dedup only):
-```bash
-cd baselines/who_and_when
-
-# W3 graph-free — record the empirical call-count blowup for §7
-CUDA_VISIBLE_DEVICES=1,2,6,7 python run_who_and_when_vllm.py \
-    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
-    --split GAIA_dedup --variant w3 \
-    --tensor_parallel_size 4 --gpu_memory_utilization 0.34 \
-    --max_model_len 32768
-```
+After GAIA_dedup is complete for each, repeat with `--split SWE_Bench_dedup`.
 
 ---
 
 ## 5. What the resulting table answers
 
-The Who&When ablation table in the paper will have one row per model and
-three method columns (W1, W2, W2+graph), reporting W-F1, Loc, Joint per
-split — same metric block as Table 1.
+The ablation table will have one row per (model, split) with six method
+columns: W1 / W1+CG / W1+GI+SI / W2 / W2+CG / W2+GI+SI, reporting W-F1, Loc,
+Joint — same metric block as Table 1.
 
-Two questions it must answer:
+Three questions it must answer:
 
-1. **Does localization strategy matter without the graph?** Compare
-   W1 vs. W2 columns. If they are within noise (which `plan.md` predicts),
-   it confirms the TRAIL-prompt baseline already captures whatever
-   localization strategy contributes on its own.
-2. **Does the graph help more in localization-aware variants than in W1?**
-   Compare the W2 → W2+graph delta against the Baseline → +GI+SI delta
-   from Table 1. The Suppes graph is precedence-filtered, so theoretically
-   W2+graph should benefit more, since W2 advances span-by-span and can
-   actually consume the "given A, look for B downstream" signal.
+1. **Does causal-graph injection help on prompt formats other than the
+   TRAIL Baseline?** Compare the W1 → W1+CG → W1+GI+SI deltas
+   against the Baseline → +CG → +GI+SI deltas in Table 1. If the +GI+SI
+   delta is in the same direction (and ideally similar magnitude) for W1 as
+   for the TRAIL prompt, the headline gain is a *method* contribution, not
+   a configuration artifact.
+2. **Is the gain prompt-format-sensitive?** Compare W1+GI+SI − W1 against
+   W2+GI+SI − W2. If they differ substantially in either direction, we
+   need a sentence about which prompt skeleton the method exploits best.
+3. **(Original Q from prior plan)** Does W2's step-by-step localization
+   consume the graph differently than W1's holistic format? Compare
+   W2+CG − W2 (graph reasoning forced per span) vs W1+CG − W1 (graph
+   reasoning in one shot). Theoretically W2 should benefit more because it
+   can act on "given A, look for B downstream" at the span level.
 
-Both questions are downstream of getting the runs done — start with #1
-(Mistral GAIA_dedup W2+graph) before launching the rest.
+Stage 1 (W1 cells) answers (1). Stage 2 (W2 cells, selectively) answers
+(2) and (3).
 
 ---
 
@@ -267,8 +283,11 @@ trace). GAIA traces have ~8 step spans (`N=8`), so ⌈log₂N⌉ = 3.
 | TRAIL Baseline / +CG / +CG+SI       | 1                         | 1×                            |
 | TRAIL +GI+SI (two-pass)             | 1–2                       | 1–2×                          |
 | **W1**                              | 1 + 1 scores = 2          | ~2×                           |
+| **W1 + CG**                         | 1 + 1 scores = 2          | ~2× (longer prompt)           |
+| **W1 + GI+SI**                      | 2 + 1 scores = 3          | ~3×                           |
 | **W2 (graph-free)**                 | N + 1 scores ≈ 9          | ~9×                           |
-| **W2 + graph**                      | N + 1 ≈ 9 (longer prompt) | ~9× calls, ~1.5–2× tokens     |
+| **W2 + CG**                         | N + 1 ≈ 9 (longer prompt) | ~9× calls, ~1.5–2× tokens     |
+| **W2 + GI+SI**                      | N + 1 sweep + 1 P2 ≈ 10   | ~10× calls                    |
 | W3 (excluded — see §7)              | ~57 typical, ~200 worst   | ~30–200×                      |
 | W3 + graph (excluded — see §7)      | ~17–26                    | ~17–26×                       |
 

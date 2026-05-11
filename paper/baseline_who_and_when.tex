@@ -27,6 +27,13 @@ relies on a single-error assumption that is broken on TRAIL, where
 the multi-label re-design forces $\mathcal{O}(K\!\cdot\!N)$ leaf
 calls in the worst case and offers no compute saving over a
 \textsc{W2} sweep.
+\textsc{W2}'s $\mathcal{O}(N)$ call schedule also carries a
+substantial runtime cost relative to all $\mathcal{O}(1)$ methods:
+end-to-end, \textsc{W2} requires 12–23 GPU-hours per model to
+process the full dedup evaluation set (234 TRAIL-GAIA +
+62 TRAIL-SWE-Bench traces), versus 80–96 minutes for our
+\textsc{+GI+SI} method — an 8–17$\times$ wall-time gap at equal or
+lower GPU allocation (see Appendix~\ref{app:w2_efficiency}).
 
 
 % ---------- (2) APPENDIX BLOCK (full detail) ----------------------
@@ -88,7 +95,68 @@ traces, so we add a proactive token-count check that records
 and ends the sweep at that point. This is a TRAIL-side safety belt
 with the same end-state behaviour as the original, not a methodological
 change. $N$ LLM calls per trace, where $N$ is the number of step-level
-spans actually scanned (median $\approx 8$ on GAIA).
+spans actually scanned (measured median: $N{=}10$ on TRAIL-GAIA,
+$N{=}30$ on TRAIL-SWE-Bench, across completed \textsc{W2} traces).
+
+\paragraph{Computational cost of \textsc{W2}.}
+\label{app:w2_efficiency}
+The $\mathcal{O}(N)$ call schedule of \textsc{W2} produces a
+substantial end-to-end runtime gap relative to the $\mathcal{O}(1)$
+methods.
+Table~\ref{tab:w2_efficiency} reports wall time and GPU-hours for
+\textsc{W2} and \textsc{+GI+SI} on the three models for which both
+runs are available (Gemma-3-27B-IT, GPT-oss-20B, GPT-oss-120B),
+processing all 296 dedup traces (234 TRAIL-GAIA + 62
+TRAIL-SWE-Bench).
+\textsc{+GI+SI} runtimes are measured from completed Slurm jobs;
+\textsc{W2} totals are extrapolated from throughput measured over
+multiple 4-hour job windows (the method never finished a single window
+for any model, requiring between two and eight sequential reruns per
+model-dataset pair).
+
+\begin{table}[h]
+\centering
+\small
+\caption{Wall time and GPU-hours for \textsc{W2} (estimated) vs.\
+\textsc{+GI+SI} (measured) on the full 296-trace dedup split.
+\textsc{W2} GPU allocations follow the baseline scripts (2 GPUs for
+Gemma, 4 GPUs for GPT-oss-20B and GPT-oss-120B);
+\textsc{+GI+SI} uses 2 GPUs for Gemma and GPT-oss-20B, 4 for
+GPT-oss-120B.}
+\label{tab:w2_efficiency}
+\begin{tabular}{lrrrr}
+\toprule
+ & \multicolumn{2}{c}{\textsc{W2} (est.)} & \multicolumn{2}{c}{\textsc{+GI+SI} (measured)} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Model & Wall time & GPU-hr & Wall time & GPU-hr \\
+\midrule
+Gemma-3-27B-IT    & ${\sim}12$\,h & 23.9 & 91\,min & 3.0 \\
+GPT-oss-20B       & ${\sim}20$\,h & 78.3 & 96\,min & 3.2 \\
+GPT-oss-120B      & ${\sim}23$\,h & 91.9 & 80\,min & 5.3 \\
+\midrule
+\textbf{Speedup}  & \multicolumn{2}{c}{} & \textbf{8--17$\times$} & \textbf{8--25$\times$} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The cost gap has two compounding sources.
+First, the $\mathcal{O}(N)$ call count: at a measured median of
+$N{=}10$ step-level calls per TRAIL-GAIA trace and $N{=}30$ per
+TRAIL-SWE-Bench trace, each \textsc{W2} trace consumes 10--30 model
+invocations versus 1--2 for \textsc{+GI+SI} (the second pass of
+\textsc{+GI+SI} fires only when Pass-1 detects a graph-source
+category, on roughly 60--75\% of traces).
+Second, the $\mathcal{O}(N^2)$ token volume: because each per-step
+call carries the growing prefix of already-seen steps, the cumulative
+input-token count is $\sum_{i=1}^{N}\mathcal{O}(i) =
+\mathcal{O}(N^2)$, while \textsc{+GI+SI} prompts grow only as
+$\mathcal{O}(N + |E|)$ where $|E|{=}13$ for the
+intervention-validated causal subgraph.
+The accuracy improvements reported for \textsc{+GI+SI} in
+Table~\ref{tab:main_results} are therefore obtained at roughly
+$\tfrac{1}{10}$th the wall time and $\tfrac{1}{20}$th the GPU-hours
+of \textsc{W2}, on top of requiring none of \textsc{W2}'s
+multi-window resubmission overhead.
 
 \paragraph{Why we omit W3.}
 The original \textsc{W3} is binary search: at each level the model

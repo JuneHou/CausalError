@@ -389,7 +389,7 @@ def main() -> int:
     parser.add_argument("--trace_dir", default="data/GAIA")
     parser.add_argument("--annotations_dir", default="processed_annotations_gaia")
     parser.add_argument("--causal_graph",
-                        default="data/trail_causal_outputs_AIC/capri_graph.json")
+                        default="data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json")
     parser.add_argument("--patch_library",
                         default="causal/patch/patch_library.json")
     parser.add_argument("--eligible_traces", default=None,

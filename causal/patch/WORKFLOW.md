@@ -624,15 +624,15 @@ cd benchmarking/
 # 1. Filter eligible traces once — saves alongside the causal graph
 python causal/patch/filter_traces.py \
     --annotations_dir  processed_annotations_gaia \
-    --causal_graph     data/trail_causal_outputs_AIC/capri_graph.json \
+    --causal_graph     data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json \
     --min_errors       2 \
     --strict
-# → data/trail_causal_outputs_AIC/eligible_traces.json
+# → data/trail_causal_outputs_full_gaia_swe_AIC/eligible_traces.json
 
 # 2. Sample a minimal covering set from those eligible traces
 python causal/patch/sample_coverage.py \
-    --eligible_file data/trail_causal_outputs_AIC/eligible_traces.json \
-    --causal_graph  data/trail_causal_outputs_AIC/capri_graph.json \
+    --eligible_file data/trail_causal_outputs_full_gaia_swe_AIC/eligible_traces.json \
+    --causal_graph  data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json \
     --out_dir       outputs/test_run \
     --min_backup    1
 # → outputs/test_run/eligible_traces_test.json  (expect ~5–10 traces)
@@ -668,7 +668,7 @@ set and cannot be tested. Check whether the edge's A-type or B-type is annotated
 python causal/patch/run_pipeline.py \
     --trace_dir        data/GAIA \
     --annotations_dir  processed_annotations_gaia \
-    --causal_graph     data/trail_causal_outputs_AIC/capri_graph.json \
+    --causal_graph     data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json \
     --eligible_file    outputs/test_run/eligible_traces_test.json \
     --out_dir          outputs/test_run \
     --model            openai/gpt-4o \
@@ -739,7 +739,7 @@ Once the test run is clean, run on all eligible traces:
 python causal/patch/run_pipeline.py \
     --trace_dir        data/GAIA \
     --annotations_dir  processed_annotations_gaia \
-    --causal_graph     data/trail_causal_outputs_AIC/capri_graph.json \
+    --causal_graph     data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json \
     --out_dir          outputs/interventions \
     --model            openai/gpt-4o \
     --rerun_model      openai/o3-mini \
@@ -759,7 +759,7 @@ python causal/patch/run_pipeline.py \
 python causal/patch/run_pipeline.py \
     --trace_dir        data/GAIA \
     --annotations_dir  processed_annotations_gaia \
-    --causal_graph     data/trail_causal_outputs_AIC/capri_graph.json \
+    --causal_graph     data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json \
     --out_dir          outputs/interventions \
     --model            openai/gpt-4o \
     --rerun_model      openai/o3-mini \

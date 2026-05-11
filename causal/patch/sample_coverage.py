@@ -15,7 +15,7 @@ Algorithm:
 Usage (from benchmarking/):
     python causal/patch/sample_coverage.py \\
         --eligible_file outputs/interventions/eligible_traces.json \\
-        --causal_graph  data/trail_causal_outputs_AIC/capri_graph.json \\
+        --causal_graph  data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json \\
         --out_dir       outputs/test_run \\
         --min_backup    1
 
@@ -165,10 +165,10 @@ def main() -> int:
         description="Sample minimal trace set covering all graph edges for pipeline testing."
     )
     parser.add_argument("--eligible_file",
-                        default="data/trail_causal_outputs_AIC/eligible_traces.json",
+                        default="data/trail_causal_outputs_full_gaia_swe_AIC/eligible_traces.json",
                         help="Path to eligible_traces.json from filter_traces.py")
     parser.add_argument("--causal_graph",
-                        default="data/trail_causal_outputs_AIC/capri_graph.json")
+                        default="data/trail_causal_outputs_full_gaia_swe_AIC/capri_graph.json")
     parser.add_argument("--out_dir", default="outputs/test_run")
     parser.add_argument("--out_file", default="eligible_traces_test.json",
                         help="Output filename inside out_dir")

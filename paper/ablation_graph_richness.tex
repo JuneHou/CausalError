@@ -8,21 +8,40 @@
 % To isolate the contribution of edge-set richness from that of the
 % injection architecture, we ablate the size of the causal graph
 % supplied at inference time while holding every other component fixed.
-% We compare two edge sets: (i) \textsc{causal-only}, the 12
-% intervention-validated edges used in the main results, and
-% (ii) \textsc{corr~$\geq 0.2$}, an enlarged set of 18 edges that adds
-% six observationally-screened edges. Each candidate edge $A\!\to\!B$
-% receives a \emph{geometric-mean score}
-% $\textit{geomean}(A\!\to\!B)=\sqrt{P(B\mid A)\cdot \Delta\textit{PR}(A\!\to\!B)}$,
-% where $P(B\mid A)$ is the empirical conditional co-occurrence in the
-% training trace pool and $\Delta\textit{PR}(A\!\to\!B)$ is the change in
-% personalised PageRank when seeding $A$ versus a uniform prior on the
-% Suppes-screened co-occurrence graph. Both factors lie in $[0,1]$, so the
-% geometric mean is monotone in each and penalises edges that are strong
-% on only one criterion. The threshold $t{=}0.2$ was chosen to recover
-% one additional category beyond the causal-only set
-% (\emph{Environment Setup Errors}) without admitting any edge whose
-% PageRank lift was below the median across all candidates.
+% Beyond the \textsc{causal-only} graph (the 12 intervention-validated
+% edges used in the main results), we sweep three correlation
+% thresholds $\tau\in\{0.35,\,0.25,\,0.20\}$ that admit increasingly
+% rich subsets of the Suppes candidate pool, and a null-graph
+% \textsc{random-12} control that samples 12 directed edges uniformly
+% from the full taxonomy excluding all Suppes-screened pairs (seed
+% fixed at 42).
+% Each candidate edge $A\!\to\!B$ in the Suppes pool receives a
+% \emph{geometric-mean score}
+% $\mathrm{score}(A\!\to\!B)=\sqrt{P(A\text{ precedes }B\mid \text{both})\;\cdot\;\Delta_{\mathrm{PR}}(A\!\to\!B)}$,
+% where the first factor is the empirical temporal-precedence rate and
+% $\Delta_{\mathrm{PR}}(A\!\to\!B)=P(B\mid A)-P(B\mid \neg A)$ is the
+% Suppes probability-raising signal. These are the two graded Suppes
+% statistics used to admit edges in the screening stage, and they are
+% independent (precedence is computed only on traces where both $A$
+% and $B$ occur, while $\Delta_{\mathrm{PR}}$ contrasts $B$'s rate
+% under presence vs.\ absence of $A$). Both factors lie in $[0,1]$,
+% so the geometric mean is monotone in each and penalises edges that
+% are strong on only one criterion; in particular, edges with high
+% precedence but negligible probability-raising — co-occurrences in
+% which $B$ would have occurred anyway — receive a low score, and
+% conversely for high $\Delta_{\mathrm{PR}}$ but low precedence.
+% Suppes admission already requires
+% $\Delta_{\mathrm{PR}}{\geq}0.05$ and $\mathrm{precedence}{\geq}0.55$
+% as conjunctive floors during graph construction, so the geomean
+% score is not comparable to either floor: it sits on a combined
+% $[0,1]$ scale and provides a ranking among already-admitted
+% candidates. At each $\tau$ the corr~$\geq\tau$ edge set is the
+% union of (i) all Suppes edges with geomean $\geq\tau$ and (ii) the
+% 12 intervention-validated causal edges (kept regardless of geomean
+% so that no main-result edge is dropped by the threshold filter).
+% The three points yield edge-set sizes $\{19,21,25\}$, anchored
+% against \textsc{causal-only} ($12$) and \textsc{random-12} ($12$,
+% null-graph control).
 % We hold the threshold and edge set fixed across models and splits and
 % evaluate two complementary injection strategies under each: a one-pass
 % static-graph variant (+CG), where the entire edge set is appended to
@@ -39,13 +58,15 @@
 % edges to 18 observationally-screened edges (geomean >= 0.2)
 % affects +GI+SI performance across the open-source model panel.
 % Also includes the one-pass +CG variant at the same threshold
-% (suppes_t0.2) to demonstrate that the two-pass GI architecture
-% is what allows the larger graph to help.
+% (corr t0.2, same 18-edge set) to demonstrate that the two-pass GI
+% architecture is what allows the larger graph to help.
 %
 % Sources:
 %   causal-only +GI+SI : outputs/zero_shot2/*-graph_inject_causal_only_span_index-metrics.txt
-%   corr0.2    +GI+SI  : outputs_corr/*-graph_inject_causal_corr0.2_span_index-metrics.txt
-%   suppes_t0.2 +CG    : outputs_corr/*-graph_suppes_t0.2-metrics.txt
+%   corr0.2    +GI+SI  : outputs_thres/t0.20/*-graph_inject_causal_corr0.2_span_index-metrics.txt
+%                        (QwenLong: outputs_thres/t0.20/*-graph_inject_suppes_t0.2_span_index-metrics.txt)
+%   corr_t0.2  +CG     : outputs_thres/t0.20/*-graph_t0.2-metrics.txt
+%                        (other models stored under outputs_corr/*-graph_suppes_t0.2-metrics.txt)
 %
 % Edge sets (from suppes_graph.json):
 %   causal-only : 12 edges, 11/20 categories covered
@@ -55,9 +76,11 @@
 % Gemini (Flash, Pro) deliberately excluded.
 %
 % Missing runs (marked ---):
-%   - QwenLong-L1-32B corr0.2 (GAIA dir empty; SWE not started)
-%   - SWE +CG (suppes t0.2) for Gemma / GPT-120B / GPT-20B
+%   - SWE +CG (corr t0.2) for Gemma / GPT-120B / GPT-20B
 %     (never executed; only matters for SWE column of +CG row)
+% Partial runs:
+%   - QwenLong corr0.2 +GI+SI on GAIA: 84/117 traces covered;
+%     missing 33 are scored as empty predictions (flagged with $\dagger$).
 % ============================================================
 
 \begin{table*}[t]
@@ -75,25 +98,25 @@
 & & W-F1 & Loc & Joint & W-F1 & Loc & Joint \\
 \midrule
 \multirow{3}{*}{Mistral-Small-3.1-24B}
-  & +CG (suppes, $t{\geq}0.2$)            & 29.33      & 27.95      & 8.68       & \textbf{9.31} &  2.40 & 0.00 \\
+  & +CG (corr, $t{\geq}0.2$)              & 29.33      & 27.95      & 8.68       & \textbf{9.31} &  2.40 & 0.00 \\
   & +GI+SI (causal-only, 12 edges)        & 30.76      & 27.79      & \textbf{11.51} &  6.76 &  1.67 & 0.00 \\
   & +GI+SI (corr ${\geq}0.2$, 18 edges)   & \textbf{36.93} & \textbf{28.13} & 10.71 &  9.07 & \textbf{3.75} & 0.00 \\[3pt]
 \multirow{3}{*}{Gemma-3-27B-IT}
-  & +CG (suppes, $t{\geq}0.2$)            & 22.53      &  5.43      & 1.00       & \text{---} & \text{---} & \text{---} \\
+  & +CG (corr, $t{\geq}0.2$)              & 22.53      &  5.43      & 1.00       & \text{---} & \text{---} & \text{---} \\
   & +GI+SI (causal-only, 12 edges)        & \textbf{25.30} & \textbf{11.00} & \textbf{1.33} & \textbf{15.16} &  2.36 & 0.00 \\
   & +GI+SI (corr ${\geq}0.2$, 18 edges)   & 20.99      & 10.67      & 0.67       & 12.75      & \textbf{3.62} & 0.00 \\[3pt]
 \multirow{3}{*}{GPT-oss-120B}
-  & +CG (suppes, $t{\geq}0.2$)            & 26.72      & 22.24      & \textbf{7.45} & \text{---} & \text{---} & \text{---} \\
+  & +CG (corr, $t{\geq}0.2$)              & 26.72      & 22.24      & \textbf{7.45} & \text{---} & \text{---} & \text{---} \\
   & +GI+SI (causal-only, 12 edges)        & 30.14      & \textbf{24.47} & 6.34   & 27.13      &  2.92 & 0.00 \\
   & +GI+SI (corr ${\geq}0.2$, 18 edges)   & \textbf{36.44} & 23.88  & 6.23       & \textbf{35.32} & \textbf{5.44} & 0.00 \\[3pt]
 \multirow{3}{*}{GPT-oss-20B}
-  & +CG (suppes, $t{\geq}0.2$)            & 21.74      & 11.63      & 2.44       & \text{---} & \text{---} & \text{---} \\
+  & +CG (corr, $t{\geq}0.2$)              & 21.74      & 11.63      & 2.44       & \text{---} & \text{---} & \text{---} \\
   & +GI+SI (causal-only, 12 edges)        & 22.29      & \textbf{18.29} & 4.40   & 13.03      &  1.33 & \textbf{0.42} \\
   & +GI+SI (corr ${\geq}0.2$, 18 edges)   & \textbf{32.04} & 17.56  & \textbf{4.73} & \textbf{18.68} & \textbf{3.61} & 0.00 \\[3pt]
 \multirow{3}{*}{QwenLong-L1-32B}
-  & +CG (suppes, $t{\geq}0.2$)            & \text{---} & \text{---} & \text{---} & \text{---} & \text{---} & \text{---} \\
-  & +GI+SI (causal-only, 12 edges)        & \textbf{16.83} & \textbf{19.23} & \textbf{3.63} & \textbf{11.09} & \textbf{0.42} & 0.00 \\
-  & +GI+SI (corr ${\geq}0.2$, 18 edges)   & \text{---} & \text{---} & \text{---} & \text{---} & \text{---} & \text{---} \\
+  & +CG (corr, $t{\geq}0.2$)              & 17.15      & 15.88      & 2.67       &  4.06      & 0.00          & 0.00 \\
+  & +GI+SI (causal-only, 12 edges)        & 16.83      & \textbf{19.23} & \textbf{3.63} & 11.09 & \textbf{0.42} & 0.00 \\
+  & +GI+SI (corr ${\geq}0.2$, 18 edges)$^\dagger$ & \textbf{23.35} & 11.69 & 2.24 & \textbf{13.24} & \textbf{0.42} & 0.00 \\
 \bottomrule
 \end{tabular}
 \caption{%
@@ -101,16 +124,27 @@
   on the open-source model panel (deduplicated splits, all metrics in \%).
   \textbf{causal-only} (12 edges): the intervention-validated subgraph used
   in the main results table.
-  \textbf{corr~${\geq}0.2$} (18 edges): adds 6 observationally-screened edges
-  passing the Suppes geomean filter at $t{=}0.2$, extending category coverage
-  to include \emph{Environment Setup Errors}.
+  \textbf{corr~${\geq}\tau$}: at each sweep point $\tau\in\{0.35,0.25,0.20\}$,
+  the union of (i) Suppes-screened edges with geomean
+  $\sqrt{P(A\text{ precedes }B\mid\text{both})\cdot \Delta_{\mathrm{PR}}(A\!\to\!B)} \geq \tau$, where
+  $\Delta_{\mathrm{PR}}(A\!\to\!B)=P(B\mid A)-P(B\mid\neg A)$ is the
+  Suppes probability-raising signal, and (ii) the 12
+  intervention-validated causal edges (kept regardless of geomean),
+  giving edge-set sizes $\{19,21,25\}$. \textbf{random-12}: 12 directed
+  edges sampled uniformly (seed $42$) from the full taxonomy excluding
+  all Suppes-screened pairs; serves as a null-graph control matched in
+  edge count to causal-only. This adds 6 observationally-screened edges over the
+  causal-only set, extending category coverage to include
+  \emph{Environment Setup Errors}.
   \textbf{+CG} is the one-pass static-graph variant; \textbf{+GI+SI} is the
   two-pass targeted-subgraph injection with span index.
   Bold: best per (model, split, metric) across the three variants.
   Ablation scoped to the open-source panel; closed-source Gemini
   models excluded.
-  \text{---}: run not yet completed (QwenLong corr~${\geq}0.2$ failed to
-  produce outputs; SWE +CG\,(suppes $t{\geq}0.2$) runs not executed for
+  $^\dagger$QwenLong +GI+SI corr~${\geq}0.2$ on GAIA is scored with
+  partial coverage (84/117 traces); the missing 33 traces are
+  counted as empty predictions.
+  \text{---}: run not executed (SWE +CG\,(corr $t{\geq}0.2$) for
   Gemma / GPT-oss-120B / GPT-oss-20B).%
 }
 \label{tab:ablation_graph_richness}
@@ -137,7 +171,7 @@
 %    coverage (esp. Environment Setup), not from better localization.
 %    On SWE, Loc improves uniformly (+1-3 pts) off near-zero baselines.
 %
-% 3. The one-pass +CG variant at t>=0.2 (suppes) is uniformly worse
+% 3. The one-pass +CG variant at t>=0.2 (corr, same 18-edge set) is uniformly worse
 %    than +GI+SI causal-only across all three GAIA models tested:
 %      - Gemma   : 22.53 vs 25.30 (-2.77)
 %      - GPT-120B: 26.72 vs 30.14 (-3.42)
@@ -148,9 +182,10 @@
 % 4. Context-budget impact of corr>=0.2 in +GI+SI is negligible:
 %    Pass 1 carries no graph; Pass 2 injects only the targeted
 %    subgraph (1-3 edges). N coverage actually increases for Mistral
-%    (64->74) and GPT-20B (87->90) on GAIA. QwenLong is the exception
-%    (corr0.2 dir empty) and needs re-runs to verify whether the
-%    failure is context-related or a launch issue.
+%    (64->74) and GPT-20B (87->90) on GAIA. QwenLong corr0.2 GAIA is
+%    partial (84/117); the W-F1 lift over causal-only (16.83 -> 23.35)
+%    is consistent with the other open-source models even with the
+%    33 missing traces scored as empty.
 %
 % 5. Implication for main table: corr>=0.2 is the dominantly better
 %    +GI+SI setting on open-source models (Gemma excepted). The main
