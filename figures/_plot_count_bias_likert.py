@@ -118,6 +118,46 @@ def count_distinct_categories(errors):
     return len(cats)
 
 
+def mean_locations_per_category(errors):
+    """Average number of distinct step-locations attached to each predicted category.
+
+    Captures "label tiling" — when one category (e.g. Hallucinations) is repeated
+    across many step IDs in the same trace.
+    """
+    cats_to_locs: dict[str, set[str]] = {}
+    for e in errors or []:
+        if not isinstance(e, dict):
+            continue
+        c = (e.get("category") or "").strip().lower()
+        if not c:
+            continue
+        loc = (e.get("location") or "").strip()
+        cats_to_locs.setdefault(c, set()).add(loc)
+    if not cats_to_locs:
+        return 0.0
+    return sum(len(v) for v in cats_to_locs.values()) / len(cats_to_locs)
+
+
+def _count_bias_score(gt_errors, pr_errors):
+    gold = count_distinct_categories(gt_errors)
+    pred = count_distinct_categories(pr_errors)
+    return gold, pred, math.log((pred + 1) / (gold + 1))
+
+
+def _spread_bias_score(gt_errors, pr_errors):
+    """Per-trace location-spread bias.
+
+    s = log((L_pred + 1) / (L_gold + 1))
+      L = mean #distinct-locations per distinct category (see
+      `mean_locations_per_category`).
+
+    s > 0 → model attaches more locations per category than gold (label tiling).
+    """
+    gold = mean_locations_per_category(gt_errors)
+    pred = mean_locations_per_category(pr_errors)
+    return gold, pred, math.log((pred + 1) / (gold + 1))
+
+
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 def _load_json_lenient(path):
@@ -151,7 +191,15 @@ def _load_json_lenient(path):
     return None
 
 
-def per_trace_scores(pred_dir, gt_dir):
+def per_trace_scores(pred_dir, gt_dir, score_fn=None):
+    """Walk gt_dir, match against pred_dir, return per-trace rows.
+
+    score_fn(gt_errors, pr_errors) -> (gold, pred, score). Defaults to
+    `_count_bias_score` (distinct-category count bias). Pass `_spread_bias_score`
+    to compute per-trace location-spread bias instead.
+    """
+    if score_fn is None:
+        score_fn = _count_bias_score
     rows = []
     n_gt = 0
     n_pred_present = 0
@@ -168,14 +216,12 @@ def per_trace_scores(pred_dir, gt_dir):
         if gt is None or pr is None:
             n_pred_unparsable += 1
             continue
-        gold = count_distinct_categories(gt.get("errors", []))
-        pred = count_distinct_categories(pr.get("errors", []))
-        s = math.log((pred + 1) / (gold + 1))
+        gold, pred, s = score_fn(gt.get("errors", []), pr.get("errors", []))
         rows.append({"gold": gold, "pred": pred, "score": s})
     return rows, n_gt, n_pred_present, n_pred_unparsable
 
 
-def collect(verbose=False, search_dirs=None):
+def collect(verbose=False, search_dirs=None, score_fn=None):
     """Walk priority-ordered output dirs.
 
     Two-pass dedup by (model, split, method):
@@ -222,7 +268,7 @@ def collect(verbose=False, search_dirs=None):
                 skipped.append((c["sd"], c["stem"], "lower_priority_duplicate"))
             continue
         gt_dir = GT_GAIA if c["split"] == "GAIA_dedup" else GT_SWE
-        rows, n_gt, n_present, n_unparsable = per_trace_scores(c["dir"], gt_dir)
+        rows, n_gt, n_present, n_unparsable = per_trace_scores(c["dir"], gt_dir, score_fn=score_fn)
         if not rows:
             if verbose:
                 skipped.append((c["sd"], c["stem"],

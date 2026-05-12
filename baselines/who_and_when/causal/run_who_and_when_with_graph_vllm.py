@@ -312,7 +312,7 @@ def main():
     )
     parser.add_argument("--model",                  type=str,   default="mistralai/Mistral-Small-3.1-24B-Instruct-2503")
     parser.add_argument("--data_dir",               type=str,   default=str(BENCH_DIR / "data"))
-    parser.add_argument("--output_dir",             type=str,   default=str(REPO / "baselines" / "outputs"))
+    parser.add_argument("--output_dir",             type=str,   default=str(REPO / "baselines" / "who_and_when" / "causal" / "outputs"))
     parser.add_argument("--split",                  type=str,   default="GAIA_dedup")
     parser.add_argument("--variant",                type=str,   default="w1", choices=["w1", "w2"])
     parser.add_argument("--tensor_parallel_size",   type=int,   default=2)

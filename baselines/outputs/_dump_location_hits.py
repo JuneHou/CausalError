@@ -31,6 +31,9 @@ import os
 import re
 from pathlib import Path
 
+import numpy as np
+from sklearn.metrics import f1_score
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 
@@ -100,6 +103,10 @@ def main() -> None:
         gt_dir = REPO / "benchmarking" / "processed_annotations_gaia"
     out_json = HERE / f"{pred_dir.name}-location_hits.json"
 
+    cat_to_idx = {c: i for i, c in enumerate(ALL_CATEGORIES)}
+    all_y_true: list[list[int]] = []
+    all_y_pred: list[list[int]] = []
+
     rows = []
     for gt_path in sorted(glob.glob(str(gt_dir / "*.json"))):
         trace_id = os.path.splitext(os.path.basename(gt_path))[0]
@@ -137,6 +144,15 @@ def main() -> None:
 
         joint_hit = gt_joint & pred_joint
         joint_acc = len(joint_hit) / len(gt_joint) if gt_joint else 0.0
+
+        y_true = [0] * len(ALL_CATEGORIES)
+        y_pred = [0] * len(ALL_CATEGORIES)
+        for c in gt_cats:
+            y_true[cat_to_idx[c]] = 1
+        for c in pred_cats:
+            y_pred[cat_to_idx[c]] = 1
+        all_y_true.append(y_true)
+        all_y_pred.append(y_pred)
 
         cat_tp = gt_cats & pred_cats
         cat_fp = pred_cats - gt_cats
@@ -199,6 +215,11 @@ def main() -> None:
     avg_loc = sum(r["location_accuracy"] for r in rows) / len(rows) if rows else 0.0
     avg_joint = sum(r["joint_accuracy"] for r in rows) / len(rows) if rows else 0.0
     avg_f1 = sum(r["cat_f1"] for r in rows) / len(rows) if rows else 0.0
+    if rows:
+        weighted_f1 = float(f1_score(np.array(all_y_true), np.array(all_y_pred),
+                                     average="weighted", zero_division=0))
+    else:
+        weighted_f1 = 0.0
     n_unmapped = sum(1 for r in rows if r["unmapped_pred_categories"])
 
     def _rel(p: Path) -> str:
@@ -215,6 +236,7 @@ def main() -> None:
             "average_location_accuracy": avg_loc,
             "average_joint_accuracy": avg_joint,
             "average_cat_f1_per_trace": avg_f1,
+            "weighted_f1": weighted_f1,
             "n_full_loc_match": len(full),
             "n_partial_loc_match": len(partial),
             "n_missed_loc": len(missed),
@@ -226,6 +248,7 @@ def main() -> None:
     print(f"avg loc acc   = {avg_loc:.4f}  (full={len(full)}, partial={len(partial)}, missed={len(missed)})")
     print(f"avg joint acc = {avg_joint:.4f}")
     print(f"avg per-trace cat F1 = {avg_f1:.4f}")
+    print(f"weighted F1   = {weighted_f1:.4f}")
     print(f"traces with unmapped predicted categories: {n_unmapped}")
 
 
