@@ -74,6 +74,7 @@ from run_eval_with_graph_vllm import (
     format_graph_guidance,
     load_graph_edges,
 )
+from run_eval_graph_inject_vllm import build_span_index
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ The problem is: {task_description}
 {taxonomy_block}
 
 {graph_guidance_block}\
+{span_index_block}\
 Identify which error categories from the taxonomy above are present in the trace, at which span, and explain the reason for each error.
 
 Here's the trace:
@@ -167,15 +169,18 @@ def run_w1_with_graph(
     max_model_len: int,
     max_new_tokens: int,
     graph_guidance: str,
+    span_index: str = "",
 ) -> Tuple[Optional[dict], dict]:
     ordered_spans = get_ordered_step_spans(trace_str)
     task_desc     = extract_task_description(trace_str)
     valid_ids     = extract_span_ids(trace_str)
     trace_text    = format_trace_for_prompt(ordered_spans)
 
+    span_index_block = (span_index + "\n\n") if span_index else ""
     user_text = W1_PROMPT_TEMPLATE.format(
         taxonomy_block       = TAXONOMY_BLOCK,
         graph_guidance_block = _graph_block(graph_guidance),
+        span_index_block     = span_index_block,
         task_description     = task_desc,
         trace                = trace_text,
     )
@@ -327,6 +332,8 @@ def main():
                         help="Min geomean score sqrt(precedence*PR_delta) for observational edges (ignored if --causal_only).")
     parser.add_argument("--causal_graph",           type=str,   default=None)
     parser.add_argument("--suppes_graph",           type=str,   default=None)
+    parser.add_argument("--span_index",             action="store_true", default=False,
+                        help="Inject a span-id index listing into W1 prompts (W2 omits it by design).")
     args = parser.parse_args()
 
     # Reasoning models need bigger output budget (same heuristic as the no-graph runner).
@@ -347,10 +354,11 @@ def main():
     print(f"Loaded {len(edges)} edges ({'causal_only' if args.causal_only else f'geomean>={args.edge_threshold}'})")
 
     graph_tag = "causal_only" if args.causal_only else f"t{args.edge_threshold}"
+    span_tag  = "_span_index" if args.span_index else ""
     model_tag = args.model.replace("/", "-")
     out_dir = os.path.join(
         args.output_dir,
-        f"outputs_{model_tag}-{args.split}-who_and_when_{args.variant}_graph_{graph_tag}",
+        f"outputs_{model_tag}-{args.split}-who_and_when_{args.variant}_graph_{graph_tag}{span_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -389,10 +397,18 @@ def main():
             continue
         with open(fp) as f:
             trace_str = f.read()
-        output, meta = runner(
-            trace_str, llm, tokenizer,
-            args.max_model_len, args.max_new_tokens, graph_guidance,
-        )
+        # W1 injects span_index if requested; W2 omits it by design (same as +GI runner).
+        span_index_text = build_span_index(trace_str) if (args.span_index and args.variant == "w1") else ""
+        if args.variant == "w1":
+            output, meta = runner(
+                trace_str, llm, tokenizer,
+                args.max_model_len, args.max_new_tokens, graph_guidance, span_index_text,
+            )
+        else:
+            output, meta = runner(
+                trace_str, llm, tokenizer,
+                args.max_model_len, args.max_new_tokens, graph_guidance,
+            )
         meta["trace_id"] = trace_id
         meta["variant"]  = args.variant
         meta["graph"]    = graph_tag

@@ -6,6 +6,236 @@ for the threshold sweep).
 
 ---
 
+## Currently In Progress
+
+Open-source panel (no Gemini Flash/Pro): **gpt-oss-20b, gpt-oss-120b, Mistral-24B, Qwen-32B, Gemma-3-27B**.
+Both splits: GAIA_dedup, SWE_Bench_dedup.
+
+### Task A — Who&When W1+graph\_inject (+GI+SI) / W2+with\_graph (+CG+SI)
+
+- **W1** uses two-pass graph injection (`graph_inject`): `run_who_and_when_graph_inject_{vllm|api_deepinfra}.py`
+- **W2** uses one-pass in-prompt graph guidance (`with_graph`): `run_who_and_when_with_graph_{vllm|api_deepinfra}.py`
+- Both variants add `--span_index` (`_span_index` suffix in output dir name)
+
+Output dir: `baselines/who_and_when/causal/outputs/`
+Naming: W1 → `outputs_{model}-{split}-who_and_when_w1_graph_inject_causal_only_span_index/`
+        W2 → `outputs_{model}-{split}-who_and_when_w2_graph_causal_only_span_index/`
+
+| Model | Split | W1 (+GI+SI) | W2 (+CG+SI) |
+|---|---|---|---|
+| gpt-oss-120b | GAIA_dedup | ✓ | ✓ |
+| gpt-oss-120b | SWE_Bench_dedup | ✓ | ✓ |
+| gpt-oss-20b | GAIA_dedup | ✓ | ✓ |
+| gpt-oss-20b | SWE_Bench_dedup | ✓ | ✓ |
+| Mistral-Small-24B | GAIA_dedup | ✓ | ✓ |
+| Mistral-Small-24B | SWE_Bench_dedup | ✓ | ✓ |
+| Qwen-32B | GAIA_dedup | ✓ | ✗ |
+| Qwen-32B | SWE_Bench_dedup | ✓ | ✗ |
+| Gemma-3-27B | GAIA_dedup | ✓ arc | ✓ arc |
+| Gemma-3-27B | SWE_Bench_dedup | ✓ arc | ✓ arc |
+
+gpt-oss models use DeepInfra API (Qwen not supported there; use vLLM for Qwen).
+Score: `python benchmarking/eval/calculate_scores.py` pointed at the output dir.
+
+#### Commands (run from repo root; source API keys first)
+
+```bash
+# ARC:       source path/to/arc_llm_api.sh   → sets ARC_LLM_API_KEY
+# DeepInfra: export DEEPINFRA_API_KEY=<key>
+
+# === ARC API — gpt-oss-120b (default model) ===
+
+# [TA-ARC-W1] W1+GI+SI
+python baselines/who_and_when/causal/run_who_and_when_graph_inject_api_arc.py \
+    --variant w1 --split GAIA_dedup --causal_only --span_index
+python baselines/who_and_when/causal/run_who_and_when_graph_inject_api_arc.py \
+    --variant w1 --split SWE_Bench_dedup --causal_only --span_index
+
+# [TA-ARC-W2] W2+CG+SI
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_arc.py \
+    --variant w2 --split GAIA_dedup --causal_only --span_index
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_arc.py \
+    --variant w2 --split SWE_Bench_dedup --causal_only --span_index
+
+# === DeepInfra API — Mistral-Small-24B ===
+
+# [TA-DI-W1] W1+GI+SI (GAIA already done via vLLM; only SWE missing)
+python baselines/who_and_when/causal/run_who_and_when_graph_inject_api_deepinfra.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --variant w1 --split SWE_Bench_dedup --causal_only --span_index
+
+# [TA-DI-W2] W2+CG+SI (both splits missing)
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_deepinfra.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --variant w2 --split GAIA_dedup --causal_only --span_index
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_deepinfra.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --variant w2 --split SWE_Bench_dedup --causal_only --span_index
+
+# === DeepInfra API — Gemma-3-27B-IT (W1 and W2, both splits missing) ===
+
+# [TA-DI-Gemma-W1] W1+GI+SI
+python baselines/who_and_when/causal/run_who_and_when_graph_inject_api_deepinfra.py \
+    --model google/gemma-3-27b-it \
+    --variant w1 --split GAIA_dedup --causal_only --span_index
+python baselines/who_and_when/causal/run_who_and_when_graph_inject_api_deepinfra.py \
+    --model google/gemma-3-27b-it \
+    --variant w1 --split SWE_Bench_dedup --causal_only --span_index
+
+# [TA-DI-Gemma-W2] W2+CG+SI
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_deepinfra.py \
+    --model google/gemma-3-27b-it \
+    --variant w2 --split GAIA_dedup --causal_only --span_index
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_deepinfra.py \
+    --model google/gemma-3-27b-it \
+    --variant w2 --split SWE_Bench_dedup --causal_only --span_index
+```
+
+### Task B — Threshold Sweep (`+GI+SI`, τ ∈ {0.35, 0.25, 0.20, random-12})
+
+Output dir: `benchmarking/outputs_thres/t<τ>/`
+Script: `benchmarking/eval/run_threshold_sweep.sh`
+
+| Model | Split | τ=0.35 | τ=0.25 | τ=0.20 | random-12 |
+|---|---|---|---|---|---|
+| gpt-oss-120b | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| gpt-oss-120b | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
+| gpt-oss-20b | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| gpt-oss-20b | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
+| Mistral-Small-24B | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| Mistral-Small-24B | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
+| Qwen-32B | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| Qwen-32B | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
+| Gemma-3-27B | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| Gemma-3-27B | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
+
+All sweep cells complete; see `paper/ablation_graph_richness.tex`
+for the assembled table.
+
+#### [TB-Rerun-gpt20b-SWE] RESOLVED 2026-05-14 — reasoning_effort='low' fix
+
+**Issue (now fixed).** All four `+GI+SI` sweep variants for gpt-oss-20b
+on SWE_Bench_dedup originally landed with $N\in\{9,10,13,12\}$ vs.\
+causal-only's $N{=}19$. Two failure modes were identified from
+`outputs_thres/_sweep_logs/openai-gpt-oss-20b-SWE_Bench_dedup-*.log`:
+
+1. **Pass-1 JSON parse failures (~5/run, the fixable mode).**
+   DeepInfra defaults gpt-oss to `reasoning_effort='high'`, which
+   burns most of the 24k `max_tokens` budget on thinking and
+   truncates the JSON tail. Fixed in
+   `benchmarking/eval/run_eval_graph_inject_api_deepinfra.py` —
+   `--reasoning_effort auto` (default) now sets `'low'` automatically
+   when the model id matches `gpt-oss-20b`. After fix: 0–2 Pass-1
+   parse failures per variant.
+2. **Context-length errors (~12/run, unfixable client-side).**
+   Some SWE_Bench traces produce prompts of 130k–570k tokens,
+   exceeding DeepInfra's 131,071-token cap. These 12 traces still
+   400 after the rerun; they are excluded from N regardless of
+   reasoning_effort.
+
+**Post-rerun result (2026-05-14)** — coverage and W-F1, before → after:
+
+| Variant   | N (before → after) | W-F1 (before → after) |
+|---|---|---|
+| random-12 | 9  → **18** | 12.53 → **23.50** |
+| τ=0.35    | 10 → **19** | 18.23 → **29.89** |
+| τ=0.25    | 13 → **17** | 19.56 → **27.71** |
+| τ=0.20    | 12 → **18** | 19.12 → **21.13** |
+
+`paper/ablation_graph_richness.tex` has been updated to drop the four
+$\dagger$ flags on the GPT-oss-20B SWE block, replace the W-F1/Loc/Joint
+values, and re-bold per (model, split, metric).
+
+**Procedure that was used** (kept for future reference / similar
+reruns; the original Step 1 used a literal-glob form that silently
+no-op'd, so it's been replaced with a proper `for d in glob` pattern
+that survives the no-match case):
+
+```bash
+# Run from benchmarking/; needs DEEPINFRA_API_KEY.
+
+# 1. Park the broken sweep dirs aside. The nested-for-loop pattern
+#    expands the glob safely (a literal "*" in `mv $src ...` silently
+#    fails when the glob doesn't match — the old form did that).
+for sub in t_random12_seed42 t0.35 t0.25 t0.20 ; do
+  for d in outputs_thres/${sub}/outputs_openai-gpt-oss-20b-SWE_Bench_dedup-graph_inject_*span_index ; do
+    [ -d "$d" ] || continue
+    mv "$d" "${d}_BROKEN_pre_reasoning_low_$(date +%Y%m%d_%H%M)"
+    echo "moved: $d"
+  done
+done
+
+# 2. Verify Step 1 worked — should list 4 _BROKEN_ dirs and no live
+#    sweep dirs. If you still see live dirs, Step 1 didn't actually
+#    move them and Step 3 will skip everything ("Pending: 0").
+ls -d outputs_thres/*/outputs_openai-gpt-oss-20b-SWE_Bench_dedup-graph_inject_* 2>/dev/null
+
+# 3. Re-run the 4 flagged thresholds (causal_only NOT in the default
+#    THRESHOLDS, so it won't be touched).
+bash eval/run_threshold_sweep.sh openai/gpt-oss-20b SWE_Bench_dedup
+# First lines of the log should show:
+#   [INFO] gpt-oss-20b detected; setting reasoning_effort='low' ...
+#   Found 31 traces. Pending: 31 (skipping 0 already done)
+# If "Pending: 0" appears, Step 1 was missed — stop and redo it.
+
+# 4. Confirm coverage recovered.
+for t in t_random12_seed42 t0.35 t0.25 t0.20 ; do
+  f=outputs_thres/${t}/outputs_openai-gpt-oss-20b-SWE_Bench_dedup-graph_inject_*span_index-metrics.txt
+  echo "=== $t ==="; grep "overall" $f | awk '{print "  N="$4}'
+done
+```
+
+Mistral SWE causal-only ($N{=}9$) / $\tau{=}0.25$ ($N{=}10$) remain
+flagged in the ablation table — those are the same long-prompt traces
+hitting the 131k context cap, not a reasoning_effort issue, so the
+same fix would not recover them.
+
+#### Commands (run from benchmarking/; source API keys same as Task A)
+
+All cells go through `eval/run_threshold_sweep.sh`, which writes per-threshold
+subdirs to `outputs_thres/t<τ>/` and runs scoring at the end. Backend is
+inferred from the model ID (see driver header); override with the 5th
+positional arg if needed.
+
+```bash
+# === ARC API — gpt-oss-120b ===     (backend inferred: bare name → arc)
+# Auth: source path/to/arc_llm_api.sh   → sets ARC_LLM_API_KEY
+
+# [TB-ARC-G] GAIA_dedup — all 4 thresholds in one call
+bash eval/run_threshold_sweep.sh gpt-oss-120b GAIA_dedup
+# [TB-ARC-S] SWE_Bench_dedup
+bash eval/run_threshold_sweep.sh gpt-oss-120b SWE_Bench_dedup
+
+# === DeepInfra API — gpt-oss-20b ===  (inferred: openai/gpt-oss-* → deepinfra)
+# Auth: export DEEPINFRA_API_KEY=<key>
+
+# [TB-DI-G] GAIA_dedup
+bash eval/run_threshold_sweep.sh openai/gpt-oss-20b GAIA_dedup
+# [TB-DI-S] SWE_Bench_dedup
+bash eval/run_threshold_sweep.sh openai/gpt-oss-20b SWE_Bench_dedup
+
+# === Gemma-3-27B-IT === (pick ONE backend; use ID matching the backend)
+
+# Option A: vLLM  (inferred: openai/gemma-* → vllm)
+# [TB-vLLM-Gemma-G] GAIA_dedup
+bash eval/run_threshold_sweep.sh openai/gemma-3-27b-it GAIA_dedup 0,1
+# [TB-vLLM-Gemma-S] SWE_Bench_dedup
+bash eval/run_threshold_sweep.sh openai/gemma-3-27b-it SWE_Bench_dedup 0,1
+
+# Option B: DeepInfra  (inferred: google/* → deepinfra)
+# [TB-DI-Gemma-G] GAIA_dedup
+# bash eval/run_threshold_sweep.sh google/gemma-3-27b-it GAIA_dedup
+# [TB-DI-Gemma-S] SWE_Bench_dedup
+# bash eval/run_threshold_sweep.sh google/gemma-3-27b-it SWE_Bench_dedup
+```
+
+Note: ARC uses bare model IDs (`gpt-oss-120b`, no prefix); DeepInfra and vLLM
+use the HF-style ID (`openai/`, `google/`, `mistralai/` …). The driver passes
+`--model` through verbatim, so the ID and the inferred backend stay in sync as
+long as you use the canonical form for each provider.
+
+---
+
 ## Ablation plan (post-stage-pipeline drop)
 
 We are NOT running the stage-by-stage construction ablation

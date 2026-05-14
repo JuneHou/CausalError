@@ -24,16 +24,24 @@
 #   <model>      e.g. openai/gpt-oss-20b, Tongyi-Zhiwen/QwenLong-L1-32B,
 #                     gemini/gemini-2.5-flash
 #   <split>      GAIA_dedup | SWE_Bench_dedup
-#   [gpus]       CUDA_VISIBLE_DEVICES value (default: 0,1). Ignored for litellm.
+#   [gpus]       CUDA_VISIBLE_DEVICES value (default: 0,1). Ignored for non-vllm backends.
 #   [output_dir] default: outputs_thres (per-threshold subdir t<t>/ is appended automatically)
-#   [backend]    vllm | litellm. If omitted, inferred from model:
-#                  models starting with "gemini/" or "openai/gpt-4" -> litellm
-#                  everything else -> vllm
+#   [backend]    vllm | litellm | deepinfra | arc. If omitted, inferred from model:
+#                  gemini/*, openai/gpt-4*, openai/o*       -> litellm
+#                  openai/gpt-oss-*, google/*               -> deepinfra
+#                  <any-other>/<name>                       -> vllm
+#                  <bare-name-no-slash> (e.g. gpt-oss-120b) -> arc
+#                Override with the 5th arg when the default doesn't fit
+#                (e.g. running openai/gpt-oss-20b on local vLLM instead).
+#                deepinfra requires DEEPINFRA_API_KEY; arc requires ARC_LLM_API_KEY.
 #
 # Examples:
-#   eval/run_threshold_sweep.sh openai/gpt-oss-20b GAIA_dedup 0,1
+#   eval/run_threshold_sweep.sh openai/gemma-3-27b-it GAIA_dedup 0,1     # vLLM
 #   eval/run_threshold_sweep.sh Tongyi-Zhiwen/QwenLong-L1-32B GAIA_dedup 2,3
-#   eval/run_threshold_sweep.sh gemini/gemini-2.5-flash GAIA_dedup "" outputs_thres litellm
+#   eval/run_threshold_sweep.sh gemini/gemini-2.5-flash GAIA_dedup        # litellm
+#   eval/run_threshold_sweep.sh openai/gpt-oss-20b GAIA_dedup             # deepinfra
+#   eval/run_threshold_sweep.sh google/gemma-3-27b-it GAIA_dedup          # deepinfra
+#   eval/run_threshold_sweep.sh gpt-oss-120b GAIA_dedup                   # arc
 
 set -euo pipefail
 
@@ -46,14 +54,18 @@ BACKEND="${5:-}"
 # Infer backend from model name if not specified
 if [[ -z "$BACKEND" ]]; then
   case "$MODEL" in
-    gemini/*|openai/gpt-4*|openai/o*) BACKEND="litellm" ;;
-    *)                                BACKEND="vllm"   ;;
+    gemini/*|openai/gpt-4*|openai/o*) BACKEND="litellm"   ;;
+    openai/gpt-oss-*|google/*)        BACKEND="deepinfra" ;;
+    */*)                              BACKEND="vllm"      ;;
+    *)                                BACKEND="arc"       ;;
   esac
 fi
 
 case "$BACKEND" in
-  vllm)    SCRIPT="eval/run_eval_graph_inject_vllm.py" ;;
-  litellm) SCRIPT="eval/run_eval_graph_inject.py"      ;;
+  vllm)      SCRIPT="eval/run_eval_graph_inject_vllm.py"          ;;
+  litellm)   SCRIPT="eval/run_eval_graph_inject.py"               ;;
+  deepinfra) SCRIPT="eval/run_eval_graph_inject_api_deepinfra.py" ;;
+  arc)       SCRIPT="eval/run_eval_graph_inject_api_arc.py"       ;;
   *) echo "Unknown backend: $BACKEND" >&2; exit 1 ;;
 esac
 
