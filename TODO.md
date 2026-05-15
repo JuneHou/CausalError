@@ -29,8 +29,8 @@ Naming: W1 → `outputs_{model}-{split}-who_and_when_w1_graph_inject_causal_only
 | gpt-oss-20b | SWE_Bench_dedup | ✓ | ✓ |
 | Mistral-Small-24B | GAIA_dedup | ✓ | ✓ |
 | Mistral-Small-24B | SWE_Bench_dedup | ✓ | ✓ |
-| Qwen-32B | GAIA_dedup | ✓ | ✗ |
-| Qwen-32B | SWE_Bench_dedup | ✓ | ✗ |
+| Qwen-32B | GAIA_dedup | ✓ | ✓ |
+| Qwen-32B | SWE_Bench_dedup | ✓ | ✓ |
 | Gemma-3-27B | GAIA_dedup | ✓ arc | ✓ arc |
 | Gemma-3-27B | SWE_Bench_dedup | ✓ arc | ✓ arc |
 
@@ -185,10 +185,86 @@ for t in t_random12_seed42 t0.35 t0.25 t0.20 ; do
 done
 ```
 
-Mistral SWE causal-only ($N{=}9$) / $\tau{=}0.25$ ($N{=}10$) remain
-flagged in the ablation table — those are the same long-prompt traces
-hitting the 131k context cap, not a reasoning_effort issue, so the
-same fix would not recover them.
+#### [TB-Rerun-mistral-SWE] Open — clean rerun via DeepInfra
+
+**Issue.** Mistral-Small-3.1-24B on SWE_Bench_dedup is flagged at
+causal-only ($N{=}9$) and $\tau{=}0.25$ ($N{=}10$) in
+`paper/ablation_graph_richness.tex`. Both are <75% of the same model's
+achievable max ($\tau{=}0.35$ has $N{=}14$). Coverage spread across
+the five variants is `random=12 / causal=9 / t0.35=14 / t0.25=10 /
+t0.20=12`. Because the variation is *per variant within the same
+model+split*, the missing traces are **Pass-1 JSON parse failures**,
+not the 131k context cap (cap-bound traces would fail uniformly
+across all five variants). The structural ceiling is $N{=}14$.
+
+**Why no code fix.** Mistral-Small-3.1-24B is not a reasoning model,
+so there is no `reasoning_effort` knob to lower (the gpt-oss-20b fix
+does not apply). A clean rerun with the existing DeepInfra runner
+should lift parse-failure traces back into N. Target post-rerun:
+$N\to 14$ on both variants.
+
+**Backend.** `run_threshold_sweep.sh` defaults `mistralai/*` to vLLM
+— for this rerun we override to DeepInfra (5th positional arg) to
+match the gpt-oss-20b workflow. Greedy decoding (`temperature=0`)
+keeps backend-cross-checks tight in expectation.
+
+**Procedure** (run from `benchmarking/`; needs `DEEPINFRA_API_KEY`):
+
+```bash
+# 1. Park the two broken output dirs aside. Same nested-for-loop
+#    pattern as the gpt-oss-20b rerun: a literal "*" in `mv $src ...`
+#    silently fails when the glob doesn't expand — the for-loop
+#    form survives the no-match case.
+for d in outputs/zero_shot2/outputs_mistralai-Mistral-Small-3.1-24B-Instruct-2503-SWE_Bench_dedup-graph_inject_causal_only_span_index ; do
+  [ -d "$d" ] || continue
+  mv "$d" "${d}_BROKEN_pre_rerun_$(date +%Y%m%d_%H%M)"
+  echo "moved: $d"
+done
+for d in outputs_thres/t0.25/outputs_mistralai-Mistral-Small-3.1-24B-Instruct-2503-SWE_Bench_dedup-graph_inject_causal_corr0.25_span_index ; do
+  [ -d "$d" ] || continue
+  mv "$d" "${d}_BROKEN_pre_rerun_$(date +%Y%m%d_%H%M)"
+  echo "moved: $d"
+done
+
+# 2. Verify Step 1 actually moved both dirs — should print 2 *_BROKEN_*
+#    paths and zero live dirs. If you still see live dirs, Step 1 didn't
+#    fire and Step 3 will skip everything ("Pending: 0").
+ls -d outputs/zero_shot2/outputs_mistralai-Mistral-Small-3.1-24B-Instruct-2503-SWE_Bench_dedup-graph_inject_causal_only_span_index* 2>/dev/null
+ls -d outputs_thres/t0.25/outputs_mistralai-Mistral-Small-3.1-24B-Instruct-2503-SWE_Bench_dedup-graph_inject_causal_corr0.25_span_index* 2>/dev/null
+
+# 3a. Re-run causal-only directly so the new output lands back at
+#     outputs/zero_shot2/ (the path the table is already sourcing from).
+python eval/run_eval_graph_inject_api_deepinfra.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split SWE_Bench_dedup \
+    --causal_only --span_index \
+    --output_dir outputs/zero_shot2
+
+# 3b. Re-run t=0.25 via the sweep with the DeepInfra backend override.
+#     THRESHOLDS env restricts the loop to a single threshold; 5th
+#     positional arg "deepinfra" forces DeepInfra (default for
+#     mistralai/* would be vLLM).
+THRESHOLDS="0.25" bash eval/run_threshold_sweep.sh \
+    mistralai/Mistral-Small-3.1-24B-Instruct-2503 SWE_Bench_dedup 0,1 outputs_thres deepinfra
+
+# 4. Score the rerun outputs.
+python eval/calculate_scores.py --results_dir outputs/zero_shot2
+# (sweep already scores t0.25 at the end of Step 3b)
+
+# 5. Confirm coverage recovered.
+echo "=== causal-only ==="
+grep "overall" outputs/zero_shot2/outputs_mistralai-Mistral-Small-3.1-24B-Instruct-2503-SWE_Bench_dedup-graph_inject_causal_only_span_index-metrics.txt | awk '{print "  N="$4}'
+echo "=== t=0.25 ==="
+grep "overall" outputs_thres/t0.25/outputs_mistralai-Mistral-Small-3.1-24B-Instruct-2503-SWE_Bench_dedup-graph_inject_causal_corr0.25_span_index-metrics.txt | awk '{print "  N="$4}'
+```
+
+**Post-rerun follow-up** (after Step 5 confirms $N$ recovered):
+update `paper/ablation_graph_richness.tex` — replace the six
+$\dagger$ cells on the Mistral SWE causal-only and $\tau{=}0.25$
+rows with the new W-F1 / Loc / Joint values, re-bold per (model,
+split, metric), and trim the abnormal-coverage paragraph in the
+caption + the take-away mentioning "Mistral SWE causal-only ($N{=}9$)
+/ $\tau{=}0.25$ ($N{=}10$)".
 
 #### Commands (run from benchmarking/; source API keys same as Task A)
 
@@ -233,6 +309,133 @@ Note: ARC uses bare model IDs (`gpt-oss-120b`, no prefix); DeepInfra and vLLM
 use the HF-style ID (`openai/`, `google/`, `mistralai/` …). The driver passes
 `--model` through verbatim, so the ID and the inferred backend stay in sync as
 long as you use the canonical form for each provider.
+
+### Task C — Threshold Sweep (`+CG`, τ ∈ {0.35, 0.25, 0.20, random-12})
+
+Same sweep as Task B but for the **one-pass** in-prompt graph guidance
+(`+CG`, no two-pass dynamic injection, no span-index by default).
+Lets the threshold-sweep ablation table contrast +CG vs +GI under the
+same edge sets and show whether the two-pass injector is what scales
+with edge count (the §4.5 claim) — currently only the +GI side has
+sweep data.
+
+Inner runners (per backend):
+- vllm    → `eval/run_eval_with_graph_vllm.py` (`--edge_threshold τ`)
+- litellm → `eval/run_eval_with_graph.py`      (`--edge_threshold τ`)
+- arc     → `eval/run_eval_with_graph_api_arc.py`       (`--corr_threshold τ`)
+- deepinfra → `eval/run_eval_with_graph_api_deepinfra.py` (`--corr_threshold τ`)
+
+`--corr_threshold τ` (API runners) gives the **union of intervention-
+validated causal edges and Suppes geomean ≥ τ** — matches the +GI sweep
+edge sets exactly. `--edge_threshold τ` (vllm/litellm) gives plain
+Suppes geomean ≥ τ with no causal union. Close in practice, slightly
+different edge counts; flag in the §4.5 caption if both backends end
+up in the final table.
+
+Output root: `benchmarking/outputs_thres_cg/t<τ>/` (parallel to
+`outputs_thres/t<τ>/` for +GI).
+Naming inside each `t<τ>/` subdir (per the inner script):
+  API runners:    `outputs_<model>-<split>-graph_causal_corr<τ>/`
+  vllm/litellm:   `outputs_<model>-<split>-graph_t<τ>/`
+  → with `--span_index`: `outputs_..._span_index/` (optional; default
+  is +CG only, no SI, to match the +CG row in the main ablation table).
+
+| Model | Split | τ=0.35 | τ=0.25 | τ=0.20 | random-12 |
+|---|---|---|---|---|---|
+| gpt-oss-120b | GAIA_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
+| gpt-oss-120b | SWE_Bench_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
+| gpt-oss-20b | GAIA_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
+| gpt-oss-20b | SWE_Bench_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
+| Mistral-Small-24B | GAIA_dedup | ⬜ | ⬜ | ✓ (`outputs_thres_cg/t0.20/-graph_t0.2/`) | ⬜ |
+| Mistral-Small-24B | SWE_Bench_dedup | ⬜ | ⬜ | ✓ (`outputs_thres_cg/t0.20/-graph_t0.2/`) | ⬜ |
+| Qwen-32B | GAIA_dedup | ⬜ | ⬜ | ✓ (`outputs_thres_cg/t0.20/-graph_t0.2/`) | ⬜ |
+| Qwen-32B | SWE_Bench_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
+| Gemma-3-27B | GAIA_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
+| Gemma-3-27B | SWE_Bench_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
+
+The three ✓ cells were generated through `run_eval_with_graph_vllm.py`
+with `--edge_threshold 0.2` (plain Suppes, no causal union); they were
+moved from `outputs/zero_shot2/` into `outputs_thres_cg/t0.20/` on
+2026-05-15. Edge-set caveat: these τ=0.20 cells differ slightly from
+what the API runners produce at the same τ (which use `--corr_threshold`,
+i.e. causal ∪ Suppes ≥ τ). For the API rows we can either:
+(i) accept the small edge-set mismatch and reuse these cells, or
+(ii) re-run the three cells through `--corr_threshold 0.20` for a
+clean union-everywhere story. Note that `--causal_only` (12 edges) is
+already a subset of the union at any τ < 1.0, so the union variant is
+the cleaner of the two.
+
+Cells expected after the sweep: 4 thresholds × 5 models × 2 splits = 40,
+minus the 3 vllm cells already on disk = **37 new runs** (or 40 if you
+re-run the three to switch to `--corr_threshold` semantics).
+
+#### Driver
+
+Shipped as a **sister script** `eval/run_threshold_sweep_cg.sh`
+(mirrors `run_threshold_sweep.sh` but calls the one-pass +CG runner
+on every backend). Same positional args, same threshold list, same
+per-model `max_model_len`, same logging + scoring at the end. The
+default OUTDIR is `outputs_thres_cg` so cells land alongside the
+existing τ=0.20 runs without colliding with the +GI `outputs_thres/`.
+
+Caveats vs the +GI sweep:
+1. **vllm/litellm runners use `--edge_threshold`** (plain Suppes,
+   no causal union). The sweep script auto-dispatches `--corr_threshold`
+   for API runners and `--edge_threshold` for vllm/litellm. Edge sets
+   at the same τ differ slightly; see the caveat above.
+2. **`--random_edges` only works on API backends.** vllm/litellm
+   skip the `random` threshold with a warning until the random-edges
+   plumbing is ported into `run_eval_with_graph_vllm.py` (mirror lines
+   231–248, 502–506, 533–538 of `run_eval_graph_inject_vllm.py`).
+3. **`--span_index` is OFF by default** to match the existing +CG row
+   in `paper/tables/threshold_sweep_ablation.tex`. Pass `SPAN_INDEX=1`
+   as an env var to flip it on.
+
+#### Commands (run from `benchmarking/`; same auth as Task B)
+
+```bash
+# === ARC API — gpt-oss-120b ===   (auth: source path/to/arc_llm_api.sh)
+# [TC-ARC-G] GAIA_dedup
+bash eval/run_threshold_sweep_cg.sh gpt-oss-120b GAIA_dedup
+# [TC-ARC-S] SWE_Bench_dedup
+bash eval/run_threshold_sweep_cg.sh gpt-oss-120b SWE_Bench_dedup
+
+# === DeepInfra API — gpt-oss-20b ===  (export DEEPINFRA_API_KEY=<key>)
+# [TC-DI-G] GAIA_dedup
+bash eval/run_threshold_sweep_cg.sh openai/gpt-oss-20b GAIA_dedup
+# [TC-DI-S] SWE_Bench_dedup
+bash eval/run_threshold_sweep_cg.sh openai/gpt-oss-20b SWE_Bench_dedup
+
+# === vLLM — Mistral / Qwen / Gemma === (local GPUs)
+# [TC-vLLM-Mistral-G] GAIA_dedup
+bash eval/run_threshold_sweep_cg.sh \
+    mistralai/Mistral-Small-3.1-24B-Instruct-2503 GAIA_dedup 0,1
+# [TC-vLLM-Mistral-S] SWE_Bench_dedup
+bash eval/run_threshold_sweep_cg.sh \
+    mistralai/Mistral-Small-3.1-24B-Instruct-2503 SWE_Bench_dedup 0,1
+
+# [TC-vLLM-Qwen-G] GAIA_dedup
+bash eval/run_threshold_sweep_cg.sh \
+    Tongyi-Zhiwen/QwenLong-L1-32B GAIA_dedup 2,3
+# [TC-vLLM-Qwen-S] SWE_Bench_dedup
+bash eval/run_threshold_sweep_cg.sh \
+    Tongyi-Zhiwen/QwenLong-L1-32B SWE_Bench_dedup 2,3
+
+# [TC-vLLM-Gemma-G] GAIA_dedup
+bash eval/run_threshold_sweep_cg.sh openai/gemma-3-27b-it GAIA_dedup 0,1
+# [TC-vLLM-Gemma-S] SWE_Bench_dedup
+bash eval/run_threshold_sweep_cg.sh openai/gemma-3-27b-it SWE_Bench_dedup 0,1
+```
+
+#### Follow-up to the threshold-sweep table
+
+Once Task C is complete, regenerate
+`paper/tables/threshold_sweep_ablation.tex` with paired +CG / +GI rows
+per variant — most natural layout: same 5 graph variants on the row
+axis but a `Method` sub-column splitting +CG vs +GI under each
+variant, OR two side-by-side tables (one per method) with identical
+row structure. Choose at table-build time based on whether the §4.5
+contrast reads better as paired-rows or paired-tables.
 
 ---
 
@@ -420,12 +623,6 @@ gpt-oss the Harmony channel leakage may still be silently degrading quality
 — worth re-running them after the parser fix to quantify.
 
 #### [A2-CGSI] Add `+CG+SI (corr t=0.2)` row across the open-source panel
-
-The current ablation table has `+CG` (no SI) and `+GI+SI` rows for corr0.2,
-but no `+CG+SI` cell. Adding it lets readers separate "graph contribution
-under one-pass injection" from "graph contribution under two-pass dynamic
-injection" while holding span-index fixed across rows. Use
-`run_eval_with_graph_vllm.py` with `--edge_threshold 0.2 --span_index`.
 
 ```bash
 # Open-source panel × both splits, +CG+SI corr0.2.
