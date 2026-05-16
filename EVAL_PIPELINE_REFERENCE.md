@@ -358,7 +358,7 @@ Default `THRESHOLDS="random 0.35 0.25 0.20"`; override via env var. Recognized v
 |---|---|
 | `Tongyi-Zhiwen/QwenLong-L1-32B*` | 128000 |
 | `mistralai/Mistral-Small-3.1-24B-Instruct-2503*` | 108000 |
-| `mistralai/Mistral-Small-3.2-24B-Instruct-2506*` | 108000 (**+CG only**) |
+| `mistralai/Mistral-Small-3.1-24B-Instruct-2503*` | 108000 (**+CG only**) |
 | `openai/gemma-3-27b-it*`, `google/gemma-3-27b-it*` | 108000 |
 | `openai/gpt-oss-20b*`, `openai/gpt-oss-120b*` | 108000 |
 | else | inner-script default (131072) |

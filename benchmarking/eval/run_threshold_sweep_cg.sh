@@ -93,7 +93,7 @@ fi
 case "$MODEL" in
   Tongyi-Zhiwen/QwenLong-L1-32B*)                 MAX_MODEL_LEN=128000 ;;
   mistralai/Mistral-Small-3.1-24B-Instruct-2503*) MAX_MODEL_LEN=108000 ;;
-  mistralai/Mistral-Small-3.2-24B-Instruct-2506*) MAX_MODEL_LEN=108000 ;;
+  mistralai/Mistral-Small-3.1-24B-Instruct-2503*) MAX_MODEL_LEN=108000 ;;
   openai/gemma-3-27b-it*|google/gemma-3-27b-it*)  MAX_MODEL_LEN=108000 ;;
   openai/gpt-oss-20b*|openai/gpt-oss-120b*)       MAX_MODEL_LEN=108000 ;;
   *)                                              MAX_MODEL_LEN=""     ;;
