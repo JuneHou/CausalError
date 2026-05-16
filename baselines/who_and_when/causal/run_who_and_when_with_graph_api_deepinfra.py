@@ -67,10 +67,15 @@ from run_eval_with_graph_vllm import (        # noqa: E402
     DEFAULT_CAUSAL_GRAPH,
     DEFAULT_SUPPES_GRAPH,
     format_graph_guidance,
-    load_graph_edges,
 )
+# load_graph_edges is imported from the +GI eval because that copy carries the
+# full --corr_threshold / --random_edges surface that we added to this runner's
+# flags; the +CG eval's copy still uses the legacy (causal_only, threshold)
+# signature. format_graph_guidance stays in run_eval_with_graph_vllm — it's
+# +CG-specific (one-pass prompt block), independent of which loader produced the edges.
 from run_eval_graph_inject_vllm import (      # noqa: E402
     build_span_index,
+    load_graph_edges,
 )
 from run_who_and_when_with_graph_vllm import (  # noqa: E402
     W1_PROMPT_TEMPLATE,
@@ -147,6 +152,13 @@ def call_chat(client, model, user_text, max_tokens, limiter, max_retries=5):
         except Exception as e:
             status = getattr(e, "status_code", None)
             if status is not None and 400 <= status < 500 and status != 429:
+                raise
+            # DeepInfra wraps upstream 400s (context-length overflow in particular)
+            # inside a 500 InternalServerError, so the status check above misses
+            # them. Without this short-circuit we'd burn ~31s of backoff (1+2+4+8+16)
+            # re-sending an oversized prompt that will never fit.
+            err_str = str(e)
+            if "maximum context length" in err_str or "BadRequestError" in err_str:
                 raise
             last_err = e
             backoff = min(60, 2 ** attempt)
@@ -300,7 +312,14 @@ def main():
                     help="Auto-bumped to 24000 for gpt-oss / reasoning models.")
     ap.add_argument("--model_tag",     default=None)
     ap.add_argument("--causal_only",   action="store_true")
-    ap.add_argument("--edge_threshold", type=float, default=0.20)
+    ap.add_argument("--corr_threshold", type=float, default=1.0,
+                    help="Causal-union threshold: include intervention-validated causal edges UNION Suppes edges with geomean sqrt(precedence*PR_delta) >= this. Set e.g. 0.35 for the corr graph. Ignored if --causal_only.")
+    ap.add_argument("--edge_threshold", type=float, default=0.20,
+                    help="Pure-Suppes threshold (no causal union) using the same geomean sqrt(precedence*PR_delta) score. Only used when neither --causal_only nor --corr_threshold<1 is set.")
+    ap.add_argument("--random_edges",  action="store_true",
+                    help="Sample N random non-Suppes edges as a null-graph control.")
+    ap.add_argument("--random_seed",   type=int, default=42)
+    ap.add_argument("--random_n",      type=int, default=12)
     ap.add_argument("--causal_graph",  default=None)
     ap.add_argument("--suppes_graph",  default=None)
     ap.add_argument("--span_index",    action="store_true",
@@ -346,12 +365,23 @@ def main():
     causal_graph = Path(args.causal_graph) if args.causal_graph else DEFAULT_CAUSAL_GRAPH
     suppes_graph = Path(args.suppes_graph) if args.suppes_graph else DEFAULT_SUPPES_GRAPH
     edges = load_graph_edges(
-        causal_only  = args.causal_only,
-        threshold    = args.edge_threshold,
-        causal_graph = causal_graph,
-        suppes_graph = suppes_graph,
+        causal_only    = args.causal_only,
+        threshold      = args.edge_threshold,
+        corr_threshold = args.corr_threshold,
+        causal_graph   = causal_graph,
+        suppes_graph   = suppes_graph,
+        random_edges   = args.random_edges,
+        random_seed    = args.random_seed,
+        random_n       = args.random_n,
     )
-    graph_tag = "causal_only" if args.causal_only else f"t{args.edge_threshold}"
+    if args.random_edges:
+        graph_tag = f"random{args.random_n}_seed{args.random_seed}"
+    elif args.causal_only:
+        graph_tag = "causal_only"
+    elif args.corr_threshold < 1.0:
+        graph_tag = f"causal_corr{args.corr_threshold}"
+    else:
+        graph_tag = f"t{args.edge_threshold}"
     print(f"Loaded {len(edges)} edges ({graph_tag})")
     for src, dst, w in edges[:10]:
         print(f"    {src} → {dst}  ({w:.3f})")

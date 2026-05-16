@@ -342,16 +342,16 @@ Naming inside each `t<τ>/` subdir (per the inner script):
 
 | Model | Split | τ=0.35 | τ=0.25 | τ=0.20 | random-12 |
 |---|---|---|---|---|---|
-| gpt-oss-120b | GAIA_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
-| gpt-oss-120b | SWE_Bench_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
-| gpt-oss-20b | GAIA_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
-| gpt-oss-20b | SWE_Bench_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
-| Mistral-Small-24B | GAIA_dedup | ⬜ | ⬜ | ✓ (`outputs_thres_cg/t0.20/-graph_t0.2/`) | ⬜ |
-| Mistral-Small-24B | SWE_Bench_dedup | ⬜ | ⬜ | ✓ (`outputs_thres_cg/t0.20/-graph_t0.2/`) | ⬜ |
+| gpt-oss-120b | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| gpt-oss-120b | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
+| gpt-oss-20b | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| gpt-oss-20b | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
+| Mistral-Small-24B | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| Mistral-Small-24B | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
 | Qwen-32B | GAIA_dedup | ⬜ | ⬜ | ✓ (`outputs_thres_cg/t0.20/-graph_t0.2/`) | ⬜ |
 | Qwen-32B | SWE_Bench_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
-| Gemma-3-27B | GAIA_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
-| Gemma-3-27B | SWE_Bench_dedup | ⬜ | ⬜ | ⬜ | ⬜ |
+| Gemma-3-27B | GAIA_dedup | ✓ | ✓ | ✓ | ✓ |
+| Gemma-3-27B | SWE_Bench_dedup | ✓ | ✓ | ✓ | ✓ |
 
 The three ✓ cells were generated through `run_eval_with_graph_vllm.py`
 with `--edge_threshold 0.2` (plain Suppes, no causal union); they were
@@ -436,6 +436,146 @@ axis but a `Method` sub-column splitting +CG vs +GI under each
 variant, OR two side-by-side tables (one per method) with identical
 row structure. Choose at table-build time based on whether the §4.5
 contrast reads better as paired-rows or paired-tables.
+
+### Task D — Main Results Table +CG+SI anchor gaps (Table 1)
+
+Fill the 3 missing `+CG+SI` (causal-only) cells in
+`paper/main_results_table.tex`. These are anchor runs at the 12
+intervention-validated edges — no threshold sweep. Paired with the
+existing `+GI+SI` column to show "+CG buys most of the gain; +GI
+closes the rest" directly in the headline table.
+
+Output dir: `outputs/zero_shot2/`
+Naming: `outputs_{model}-{split}-graph_causal_only_span_index/`
+
+| Model | Split | +CG+SI |
+|---|---|---|
+| Gemini-2.5-Pro | GAIA_dedup | ⬜ |
+| Gemini-2.5-Pro | SWE_Bench_dedup | ⬜ |
+| Mistral-Small-3.1-24B | SWE_Bench_dedup | ✓ |
+
+#### Commands (run from `benchmarking/`)
+
+```bash
+# [TD-Pro-G] Gemini-2.5-Pro × GAIA_dedup
+python eval/run_eval_with_graph.py \
+    --model gemini/gemini-2.5-pro \
+    --split GAIA_dedup \
+    --causal_only --span_index \
+    --output_dir outputs/zero_shot2
+
+# [TD-Pro-S] Gemini-2.5-Pro × SWE_Bench_dedup
+python eval/run_eval_with_graph.py \
+    --model gemini/gemini-2.5-pro \
+    --split SWE_Bench_dedup \
+    --causal_only --span_index \
+    --output_dir outputs/zero_shot2
+
+# [TD-Mistral-S] Mistral-Small-3.1-24B × SWE_Bench_dedup
+CUDA_VISIBLE_DEVICES=0,1 python eval/run_eval_with_graph_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --split SWE_Bench_dedup \
+    --causal_only --span_index \
+    --tensor_parallel_size 2 --max_model_len 108000 \
+    --output_dir outputs/zero_shot2
+```
+
+Score with `python eval/calculate_scores.py --results_dir outputs/zero_shot2`.
+
+Task D subsumes the optional P5/P7 commands at the bottom of this file
+(those used the same model + split + `--causal_only` plus `--span_index`
+on Pro). Drop the bottom-of-file optional block after Task D lands.
+
+After all three cells are on disk, update `paper/main_results_table.tex`
+to add a `+CG+SI` row under Pro and Mistral, and drop the `\text{---}`
+markers in `Table 4` (trace coverage) for Pro and Mistral SWE.
+
+### Task E — Who&When W1+CG+SI panel (Table 3)
+
+Fill the 9 missing `W1+CG+SI` cells in
+`paper/tables/who_and_when_results.tex`. This is the +CG analogue of
+the existing `W1+GI+SI` column — one-pass static causal graph injected
+into the W1 (all-at-once) prompt, span-indexed.
+
+The runner `run_who_and_when_with_graph_*.py` already supports
+`--variant w1 --causal_only --span_index`; no code change needed.
+
+Output dir: `baselines/who_and_when/causal/outputs/`
+Naming: `outputs_{model}-{split}-who_and_when_w1_graph_causal_only_span_index/`
+
+| Model | Split | W1+CG+SI |
+|---|---|---|
+| Mistral-Small-3.1-24B | GAIA_dedup | ⬜ |
+| Mistral-Small-3.1-24B | SWE_Bench_dedup | ✓ on disk |
+| GPT-oss-120B | GAIA_dedup | ✓ |
+| GPT-oss-120B | SWE_Bench_dedup | ✓ |
+| GPT-oss-20B | GAIA_dedup | ✓ |
+| GPT-oss-20B | SWE_Bench_dedup | ✓ |
+| Gemma-3-27B-IT | GAIA_dedup | ✓ |
+| Gemma-3-27B-IT | SWE_Bench_dedup | ⬜ |
+| QwenLong-L1-32B | GAIA_dedup | ⬜ |
+| QwenLong-L1-32B | SWE_Bench_dedup | ⬜ |
+
+#### Commands (run from repo root; source the same API keys as Task A)
+
+```bash
+# === ARC API — gpt-oss-120b ===  (source path/to/arc_llm_api.sh)
+# [TE-ARC-G] GPT-oss-120B × GAIA_dedup
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_arc.py \
+    --variant w1 --split GAIA_dedup --causal_only --span_index
+# [TE-ARC-S] GPT-oss-120B × SWE_Bench_dedup
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_arc.py \
+    --variant w1 --split SWE_Bench_dedup --causal_only --span_index
+
+# === DeepInfra API — gpt-oss-20b ===  (export DEEPINFRA_API_KEY=<key>)
+# [TE-DI-G] GPT-oss-20B × GAIA_dedup
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_deepinfra.py \
+    --model openai/gpt-oss-20b \
+    --variant w1 --split GAIA_dedup --causal_only --span_index
+# [TE-DI-S] GPT-oss-20B × SWE_Bench_dedup
+python baselines/who_and_when/causal/run_who_and_when_with_graph_api_deepinfra.py \
+    --model openai/gpt-oss-20b \
+    --variant w1 --split SWE_Bench_dedup --causal_only --span_index
+
+# === vLLM — Mistral / Gemma / QwenLong ===
+
+# [TE-vLLM-Mistral-G] Mistral × GAIA_dedup  (SWE already on disk)
+CUDA_VISIBLE_DEVICES=0,1 python baselines/who_and_when/causal/run_who_and_when_with_graph_vllm.py \
+    --model mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+    --variant w1 --split GAIA_dedup --causal_only --span_index \
+    --tensor_parallel_size 2 --max_model_len 108000
+
+# [TE-vLLM-Gemma-G] Gemma × GAIA_dedup
+CUDA_VISIBLE_DEVICES=0,1 python baselines/who_and_when/causal/run_who_and_when_with_graph_vllm.py \
+    --model openai/gemma-3-27b-it \
+    --variant w1 --split GAIA_dedup --causal_only --span_index \
+    --tensor_parallel_size 2 --max_model_len 108000
+# [TE-vLLM-Gemma-S] Gemma × SWE_Bench_dedup
+CUDA_VISIBLE_DEVICES=0,1 python baselines/who_and_when/causal/run_who_and_when_with_graph_vllm.py \
+    --model openai/gemma-3-27b-it \
+    --variant w1 --split SWE_Bench_dedup --causal_only --span_index \
+    --tensor_parallel_size 2 --max_model_len 108000
+
+# [TE-vLLM-Qwen-G] QwenLong × GAIA_dedup
+CUDA_VISIBLE_DEVICES=2,3 python baselines/who_and_when/causal/run_who_and_when_with_graph_vllm.py \
+    --model Tongyi-Zhiwen/QwenLong-L1-32B \
+    --variant w1 --split GAIA_dedup --causal_only --span_index \
+    --tensor_parallel_size 2 --max_model_len 128000
+# [TE-vLLM-Qwen-S] QwenLong × SWE_Bench_dedup
+CUDA_VISIBLE_DEVICES=2,3 python baselines/who_and_when/causal/run_who_and_when_with_graph_vllm.py \
+    --model Tongyi-Zhiwen/QwenLong-L1-32B \
+    --variant w1 --split SWE_Bench_dedup --causal_only --span_index \
+    --tensor_parallel_size 2 --max_model_len 128000
+```
+
+Score with the standard W&W scoring path
+(`python benchmarking/eval/calculate_scores.py` pointed at each
+output dir).
+
+After the 9 cells land, add the `W1+CG+SI` row to the W1 block of
+`paper/tables/who_and_when_results.tex` (parallel to the existing
+`W1+GI+SI` row), and re-bold per-column maxima across all five
+graph-variant rows per model.
 
 ---
 

@@ -345,7 +345,7 @@ def main():
     parser.add_argument("--variant",                type=str,   default="w1", choices=["w1", "w2"])
     parser.add_argument("--tensor_parallel_size",   type=int,   default=2)
     parser.add_argument("--max_model_len",          type=int,   default=131072)
-    parser.add_argument("--gpu_memory_utilization", type=float, default=0.75)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.8)
     parser.add_argument("--max_new_tokens",         type=int,   default=8000)
     parser.add_argument("--enforce_eager",          action="store_true", default=True)
     parser.add_argument("--no_enforce_eager",       dest="enforce_eager", action="store_false")

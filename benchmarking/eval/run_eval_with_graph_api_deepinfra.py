@@ -140,6 +140,12 @@ def call_chat(client, model, user_text, max_tokens, limiter, max_retries=5,
             status = getattr(e, "status_code", None)
             if status is not None and 400 <= status < 500 and status != 429:
                 raise
+            # DeepInfra wraps upstream 400s (notably context-length overflow)
+            # inside a 500 InternalServerError, so the status check above misses
+            # them and we'd burn 31s of backoff re-sending an oversized prompt.
+            err_str = str(e)
+            if "maximum context length" in err_str or "BadRequestError" in err_str:
+                raise
             last_err = e
             backoff = min(60, 2 ** attempt)
             print(f"[retry {attempt+1}/{max_retries}] {type(e).__name__}: "

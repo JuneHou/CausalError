@@ -72,9 +72,13 @@ from run_eval_with_graph_vllm import (
     DEFAULT_CAUSAL_GRAPH,
     DEFAULT_SUPPES_GRAPH,
     format_graph_guidance,
-    load_graph_edges,
 )
-from run_eval_graph_inject_vllm import build_span_index
+# load_graph_edges is imported from the +GI eval because that copy carries the
+# full --corr_threshold / --random_edges surface that we added to this runner's
+# flags; the +CG eval's copy still uses the legacy (causal_only, threshold)
+# signature. format_graph_guidance stays here — it's +CG-specific (one-pass
+# prompt block), independent of which loader produced the edges.
+from run_eval_graph_inject_vllm import build_span_index, load_graph_edges
 
 
 # ---------------------------------------------------------------------------
@@ -328,8 +332,14 @@ def main():
     parser.add_argument("--no_enforce_eager",       dest="enforce_eager", action="store_false")
     parser.add_argument("--causal_only",            action="store_true", default=False,
                         help="Use only the intervention-validated causal edges.")
+    parser.add_argument("--corr_threshold",         type=float, default=1.0,
+                        help="Causal-union threshold: include intervention-validated causal edges UNION Suppes edges with geomean sqrt(precedence*PR_delta) >= this. Set e.g. 0.35 for the corr graph. Ignored if --causal_only.")
     parser.add_argument("--edge_threshold",         type=float, default=0.20,
-                        help="Min geomean score sqrt(precedence*PR_delta) for observational edges (ignored if --causal_only).")
+                        help="Pure-Suppes threshold (no causal union) using the same geomean sqrt(precedence*PR_delta) score. Only used when neither --causal_only nor --corr_threshold<1 is set.")
+    parser.add_argument("--random_edges",           action="store_true",
+                        help="Sample N random non-Suppes edges as a null-graph control.")
+    parser.add_argument("--random_seed",            type=int,   default=42)
+    parser.add_argument("--random_n",               type=int,   default=12)
     parser.add_argument("--causal_graph",           type=str,   default=None)
     parser.add_argument("--suppes_graph",           type=str,   default=None)
     parser.add_argument("--span_index",             action="store_true", default=False,
@@ -345,15 +355,25 @@ def main():
     causal_graph = Path(args.causal_graph) if args.causal_graph else DEFAULT_CAUSAL_GRAPH
     suppes_graph = Path(args.suppes_graph) if args.suppes_graph else DEFAULT_SUPPES_GRAPH
     edges = load_graph_edges(
-        causal_only  = args.causal_only,
-        threshold    = args.edge_threshold,
-        causal_graph = causal_graph,
-        suppes_graph = suppes_graph,
+        causal_only    = args.causal_only,
+        threshold      = args.edge_threshold,
+        corr_threshold = args.corr_threshold,
+        causal_graph   = causal_graph,
+        suppes_graph   = suppes_graph,
+        random_edges   = args.random_edges,
+        random_seed    = args.random_seed,
+        random_n       = args.random_n,
     )
+    if args.random_edges:
+        graph_tag = f"random{args.random_n}_seed{args.random_seed}"
+    elif args.causal_only:
+        graph_tag = "causal_only"
+    elif args.corr_threshold < 1.0:
+        graph_tag = f"causal_corr{args.corr_threshold}"
+    else:
+        graph_tag = f"t{args.edge_threshold}"
     graph_guidance = format_graph_guidance(edges, causal_only=args.causal_only)
-    print(f"Loaded {len(edges)} edges ({'causal_only' if args.causal_only else f'geomean>={args.edge_threshold}'})")
-
-    graph_tag = "causal_only" if args.causal_only else f"t{args.edge_threshold}"
+    print(f"Loaded {len(edges)} edges ({graph_tag})")
     span_tag  = "_span_index" if args.span_index else ""
     model_tag = args.model.replace("/", "-")
     out_dir = os.path.join(
