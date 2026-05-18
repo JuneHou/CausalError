@@ -101,7 +101,7 @@ done
 | Mistral-Small-3.1-24B | GAIA, SWE | W1+GI+SI, W2+CG+SI | ✓ |
 | GPT-oss-120B | GAIA, SWE | W1+GI+SI, W2+CG+SI | ✓ |
 | GPT-oss-20B | GAIA, SWE | W1+GI+SI, W2+CG+SI | ✓ |
-| Gemma-3-27B-IT | GAIA, SWE | W1+GI+SI, W2+CG+SI | 4 |
+| Gemma-3-27B-IT | GAIA, SWE | W1+GI+SI, W2+CG+SI | ✓ |
 | QwenLong-L1-32B | GAIA, SWE | W1+GI+SI, W2+CG+SI | 4 |
 | **Total** | | | **20** |
 

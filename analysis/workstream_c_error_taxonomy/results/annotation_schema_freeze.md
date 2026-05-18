@@ -1,0 +1,61 @@
+# Workstream C Annotation Schema Freeze
+
+## Layer 1: Benchmark taxonomy (frozen)
+
+- Reasoning Errors
+  - Hallucinations: Language-only, Tool-related
+  - Information Processing: Poor Information Retrieval, Tool Output Misinterpretation
+  - Decision Making: Incorrect Problem Identification, Tool Selection Errors
+  - Output Generation: Formatting Errors, Instruction Non-compliance
+- System Execution Errors
+  - Configuration: Tool Definition Issues, Environment Setup Errors
+  - API Issues: Rate Limiting, Authentication Errors, Service Errors, Resource Not Found
+  - Resource Management: Resource Exhaustion, Timeout Issues
+- Planning and Coordination Errors
+  - Context Management: Context Handling Failures, Resource Abuse
+  - Task Management: Goal Deviation, Task Orchestration
+
+## Layer 2: Mechanism annotation labels (frozen)
+- mechanism_bucket: causal-backed-gain, corr-added-gain, causal-preserving-neutral, corr-induced-harm, shared-failure
+- pattern_tags: missing-context-recovery, dependency-chain-recovery, precision-preserving-correction, late-stage-recovery, causal-anchor-dominant, weak-signal-augmentation, over-propagation-fp-chain, localization-drift, spurious-correlation-trigger, already-solved-no-graph-needed, shared-upstream-miss, ambiguous-gold-location
+- corr_edge_role: beneficial, neutral, harmful, unknown
+- impact_severity: low, medium, high
+- confidence: high, medium
+
+## Mechanism bucket definitions (theory-based, frozen)
+
+- causal-backed-gain
+  - definition: Causal-only already improves over baseline, and corr-union does not reverse that gain.
+  - inclusion_rule: delta_wf1_vs_base > 0 for causal-only; corr does not reduce below baseline-level recovery.
+  - exclusion_rule: Do not use when corr causes clear regression against causal-only with harmful FP propagation.
+- corr-added-gain
+  - definition: Corr-union yields additional improvement beyond causal-only on the same trace.
+  - inclusion_rule: delta_corr_vs_causal > 0 with evidence of added true-positive recovery or better joint/localization behavior.
+  - exclusion_rule: Do not use when improvement comes only from noisy FP increases without meaningful TP recovery.
+- causal-preserving-neutral
+  - definition: Corr-union is approximately neutral relative to causal-only while preserving causal behavior.
+  - inclusion_rule: Near-zero net change vs causal-only and no material new harmful error pattern.
+  - exclusion_rule: Do not use if corr clearly helps or harms in a direction that changes mechanism interpretation.
+- corr-induced-harm
+  - definition: Corr-union degrades behavior relative to causal-only due to over-propagation or spurious triggering.
+  - inclusion_rule: delta_corr_vs_causal < 0 with evidence of added FP chains, localization drift, or wrong-category spread.
+  - exclusion_rule: Do not use for cases where all variants fail similarly without corr-specific harm.
+- shared-failure
+  - definition: Baseline, causal-only, and corr-union all fail on the key gold signal(s).
+  - inclusion_rule: Core gold categories remain missed across all variants; no variant offers meaningful recovery.
+  - exclusion_rule: Do not use if any variant has clear mechanism-consistent recovery.
+
+## Pattern tag definitions (frozen)
+
+- missing-context-recovery: Model recovers a gold error after graph signal supplies context that was absent in baseline/causal pass.
+- dependency-chain-recovery: Recovery follows a plausible upstream->downstream dependency chain consistent with error propagation logic.
+- precision-preserving-correction: Gain occurs with minimal added FP categories; precision is largely preserved.
+- late-stage-recovery: Improvement appears at later reasoning/trace stages rather than initial detection stage.
+- causal-anchor-dominant: Observed behavior is mainly explained by intervention-validated causal edges rather than corr additions.
+- weak-signal-augmentation: Corr edges amplify weak but relevant cues to recover otherwise missed gold categories.
+- over-propagation-fp-chain: Corr edges trigger cascaded false positives across multiple non-gold categories.
+- localization-drift: Category may be partially right but location/span quality degrades.
+- spurious-correlation-trigger: Corr edge appears to activate unsupported category predictions lacking grounded evidence.
+- already-solved-no-graph-needed: Baseline already solves key gold categories; graph adds little value.
+- shared-upstream-miss: All variants miss the same upstream prerequisite signal, causing downstream failure.
+- ambiguous-gold-location: Gold location mapping itself is noisy/uncertain, limiting definitive localization conclusions.
