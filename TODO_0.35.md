@@ -2,7 +2,7 @@
 
 **Pivot**: change the +GI headline graph from causal-only (12 edges) to corr~$\geq$~0.35 Suppes-screened super-graph (24 edges). All three TRAIL tables affected.
 
-**Decision basis**: threshold sweep (Table `threshold_sweep_ablation.tex`) shows τ=0.35 has the highest mean F1 across the 5-model open-source panel (0.2526), the most per-cell F1 wins (4/10), and is the most parsimonious corr-thresholded option.
+**Decision basis**: threshold sweep (Table `threshold_sweep_ablation.tex`) shows τ=0.35 has the highest mean **W-F1 gain over the causal-only baseline** across the 5-model open-source panel (+4.84 W-F1 across 10 (model, split) cells; next best τ=0.25 at +4.74). It also has the most per-cell F1 wins (4/10) and is the most parsimonious corr-thresholded option (19 edges vs 21 / 25). Mean raw W-F1 (0.2526) agrees with the gain criterion — the selection is robust to either aggregation.
 
 **Affected tables** (all in `paper/tables/`):
 1. `main_results_0.35.tex` — NEW, drafted; 4 cells pending.
@@ -217,7 +217,7 @@ If the paper contains a paired-row block comparing +CG and +GI under the same ed
 ## 5. τ-selection defensibility (optional, narrative) — 0 runs
 
 If reviewers may push back on in-sample τ-selection:
-- Pick τ=0.35 using **GAIA** mean F1 (where it wins).
+- Pick τ=0.35 using **GAIA mean W-F1 gain over causal-only** (where it wins).
 - Report SWE results at the same τ without re-tuning.
 
 Pure re-tabulation. Costs nothing. Strengthens the methodology section without new compute.
@@ -239,3 +239,70 @@ Pure re-tabulation. Costs nothing. Strengthens the methodology section without n
 ## Cross-reference (out of scope here)
 
 MAST has its own pivot considerations (Task 4 +CG sweep already in flight; main table needs 1 GPT-4o cell at chosen τ). Not in scope here — see `/data/wang/junh/githubs/MAST/TODO.md`.
+
+---
+
+# Follow-up — Closed-source cross-benchmark coverage
+
+**Pivot**: In the combined main-results table
+(`/data/wang/junh/githubs/-EMNLP-2026-CASCADE-Causal-Error/tables/main_results_combine.tex`),
+split the merged "Closed-source" row into separate **Gemini** and **GPT-4o** rows so each
+covers all three benchmark columns (TRAIL-GAIA, TRAIL-SWE-Bench, MAST).
+
+This file owns the **TRAIL-side GPT-4o** runs (direct OpenAI API via the existing
+litellm runners — no router needed). MAST-side Gemini runs go through OpenRouter
+and are tracked in `/data/wang/junh/githubs/MAST/TODO_0.5.md` (§4-§5).
+
+## 6. TRAIL GPT-4o cells — 4 runs ★ critical
+
+| # | Model | Split | Method | Backend |
+|---|---|---|---|---|
+| 1 | openai/gpt-4o | GAIA_dedup | Baseline | OpenAI direct via litellm (`run_eval.py`) |
+| 2 | openai/gpt-4o | SWE_Bench_dedup | Baseline | OpenAI direct via litellm (`run_eval.py`) |
+| 3 | openai/gpt-4o | GAIA_dedup | +GI(τ=0.35)+SI | OpenAI direct via litellm (`run_eval_graph_inject.py`) |
+| 4 | openai/gpt-4o | SWE_Bench_dedup | +GI(τ=0.35)+SI | OpenAI direct via litellm (`run_eval_graph_inject.py`) |
+
+Commands (run from `benchmarking/`; `OPENAI_API_KEY` exported in shell):
+
+```bash
+cd benchmarking
+# ============================================================
+# Baseline (no graph) — 2 cells
+#   --output_dir outputs/zero_shot2 (alongside existing zero_shot/)
+#   --max_workers 1   (long context; keep serial)
+# ============================================================
+for split in GAIA_dedup SWE_Bench_dedup; do
+  python eval/run_eval.py \
+    --model openai/gpt-4o --split "$split" \
+    --output_dir outputs/zero_shot2 \
+    --max_workers 1
+done
+
+# ============================================================
+# +GI at τ=0.35 with span_index — 2 cells
+# ============================================================
+for split in GAIA_dedup SWE_Bench_dedup; do
+  python eval/run_eval_graph_inject.py \
+    --model openai/gpt-4o --split "$split" \
+    --corr_threshold 0.35 --span_index \
+    --output_dir outputs_thres/t0.35
+done
+```
+
+Expected output paths:
+```
+benchmarking/outputs/zero_shot2/outputs_openai-gpt-4o-{GAIA_dedup,SWE_Bench_dedup}/
+benchmarking/outputs_thres/t0.35/outputs_openai-gpt-4o-{GAIA_dedup,SWE_Bench_dedup}-graph_inject_causal_corr0.35_span_index/
+```
+
+After completion: score with `calculate_scores.py`, then add a new GPT-4o block to
+`main_results_trail.tex` and (re-)tabulate the combined `main_results_combine.tex`
+to split the merged "Closed-source" row into Gemini + GPT-4o rows.
+
+## Cross-benchmark total
+
+| Side | Runs | New scripts | TODO file |
+|---|---|---|---|
+| TRAIL (this file, §6) — GPT-4o via OpenAI direct | 4 | 0 | `trail-benchmark/TODO_0.35.md` |
+| MAST — Gemini-Flash + Gemini-Pro via OpenRouter | 4 | 2 | `MAST/TODO_0.5.md` (§4-§5) |
+| **Total runs** | **8** | **2 scripts** | |
