@@ -18,11 +18,17 @@ Output columns (printed + optional CSV):
     n_emerged, n_strengthened,
     delta, delta_valid_only, validated
 
-delta formula:
-    disappeared=-1, weakened=-0.5, unchanged=0, not_observable=0,
-    emerged=+1, strengthened=+1, delayed=0, earlier=0
-    delta = sum(scores) / n_total
-    delta_valid_only = same but restricted to b_present_baseline=True cases
+delta formula (as implemented in `aggregate()` below):
+    delta            = mean(target_present_after) - mean(b_present_baseline)
+    delta_valid_only = same, restricted to b_present_baseline=True cases
+So `delta` is the risk-difference estimator on the binary outcome 1[B present];
+the EFFECT_SCORES dict below is kept only for diagnostic label tallies, it is
+NOT used in the delta computation.
+
+Sign convention in this CSV: NEGATIVE delta means the intervention suppressed B
+(causal prevention confirmed) and `validated == True`. This is the OPPOSITE of
+the paper convention, where the reported Delta is sign-flipped so that LARGER =
+stronger prevention. The flip is cosmetic: paper_delta = -csv_delta.
 """
 from __future__ import annotations
 
@@ -36,7 +42,10 @@ from typing import Dict, List, Tuple
 
 
 # ---------------------------------------------------------------------------
-# Effect score mapping
+# Effect score mapping (diagnostic only; NOT used in `delta`).
+# `delta` is computed from raw `target_present_after` vs. `b_present_baseline`
+# counts in `aggregate()`; this dict is kept so per-label tallies can be
+# reported next to the risk-difference delta.
 # ---------------------------------------------------------------------------
 
 EFFECT_SCORES: Dict[str, float] = {

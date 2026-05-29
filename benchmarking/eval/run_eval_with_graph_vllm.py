@@ -1,20 +1,33 @@
 """
-eval/run_eval_with_graph_vllm.py — zero-shot QwenLong evaluation with Suppes causal graph
-guidance injected into the prompt. Mirrors run_eval_with_graph.py (Gemini) but uses vLLM.
+eval/run_eval_with_graph_vllm.py — zero-shot vLLM evaluation with Suppes causal graph
+guidance injected into the prompt (one-pass +CG). Mirrors run_eval_with_graph.py
+(Gemini) but uses vLLM.
 
 Identical to run_eval_vllm.py except the prompt is augmented with a "Causal Error Patterns"
 section derived from the Suppes graph, placed before the trace.
 
+Graph-selection flags (same semantics as run_eval_with_graph_api_deepinfra.py /
+run_eval_graph_inject_vllm.py):
+    --causal_only                  intervention-validated edges only
+    --corr_threshold 0.35          causal ∪ (Suppes geomean ≥ τ)   ← main-table +CG
+    --edge_threshold 0.20          plain Suppes geomean ≥ τ (no causal union)
+    --random_edges --random_seed N --random_n K   random control
+
 Usage (from benchmarking/):
+    # Main-table +CG cell (τ = 0.35 corr-union, 19 edges):
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python eval/run_eval_with_graph_vllm.py \\
+        --model Tongyi-Zhiwen/QwenLong-L1-32B --split GAIA_dedup \\
+        --tensor_parallel_size 4 --corr_threshold 0.35 \\
+        --output_dir outputs_thres_cg/t0.35
+
+    # Causal-only anchor:
     CUDA_VISIBLE_DEVICES=3,4,5,6 python eval/run_eval_with_graph_vllm.py --split GAIA --causal_only
-    CUDA_VISIBLE_DEVICES=3,4,5,6 python eval/run_eval_with_graph_vllm.py --split GAIA --causal_only --span_index
 
 Outputs are saved to:
-    outputs/zero_shot/outputs_{model_tag}-{split}-graph_causal_only/
+    {output_dir}/outputs_{model_tag}-{split}-graph_{graph_tag}/
 and can be scored with the standard calculate_scores.py.
 """
 
-import math
 import os
 import sys
 import glob
@@ -32,7 +45,14 @@ DEFAULT_CAUSAL_GRAPH = BENCH_DIR / "outputs" / "interventions_full_gaia_swe_merg
 DEFAULT_SUPPES_GRAPH = CAUSAL_DIR / "suppes_graph.json"
 
 sys.path.insert(0, str(BENCH_DIR))
+sys.path.insert(0, str(BENCH_DIR / "eval"))
 from span_level_parser import parse_trace_to_step_level, _span_name
+# Reuse the inject-runner's loader/formatter so corr_threshold (causal-union)
+# and random_edges semantics stay in lockstep with the +GI / DeepInfra paths.
+from run_eval_graph_inject_vllm import (   # noqa: E402
+    load_graph_edges,
+    format_graph_guidance,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,94 +83,6 @@ def build_span_index(trace_str: str) -> str:
             if csid and csid not in seen:
                 seen.add(csid)
                 lines.append(f'    span_id "{csid}"  ({csname})')
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Causal graph loading + formatting (same logic as run_eval_with_graph.py)
-# ---------------------------------------------------------------------------
-
-def _parse_causal_graph(path: Path, pr_lookup: dict) -> list:
-    """
-    Parse a causal graph JSON file.  Handles two formats:
-      - effect_edges.json  : {"edges": {"A -> B": {"a":..,"b":..,"validated":bool,"delta":..}}}
-        → returns only validated=true edges; weight = abs(delta)
-      - capri_graph.json   : {"edges": [{"a":..,"b":..}]}
-        → returns all edges; weight = pr_delta from Suppes lookup (else 1.0)
-    """
-    with open(path) as f:
-        data = json.load(f)
-    raw = data["edges"]
-    if isinstance(raw, dict):
-        return [
-            (v["a"], v["b"], abs(v["delta"]))
-            for v in raw.values()
-            if v.get("validated", False)
-        ]
-    else:
-        return [(e["a"], e["b"], pr_lookup.get((e["a"], e["b"]), 1.0)) for e in raw]
-
-
-def load_graph_edges(causal_only: bool = False, threshold: float = 0.10,
-                     causal_graph: Path = DEFAULT_CAUSAL_GRAPH,
-                     suppes_graph: Path = DEFAULT_SUPPES_GRAPH) -> list:
-    """Load edges from plain JSON files — no torch or embeddings needed."""
-    pr_lookup: dict = {}
-    if suppes_graph.exists():
-        with open(suppes_graph) as f:
-            sg = json.load(f)
-        for e in sg["edges"]:
-            pr_lookup[(e["a"], e["b"])] = e["pr_delta"]
-
-    if causal_only:
-        if not causal_graph.exists():
-            raise FileNotFoundError(f"{causal_graph} not found")
-        edges = _parse_causal_graph(causal_graph, pr_lookup)
-    else:
-        if not suppes_graph.exists():
-            raise FileNotFoundError(f"{suppes_graph} not found")
-        with open(suppes_graph) as f:
-            data = json.load(f)
-        edges = []
-        for e in data["edges"]:
-            score = math.sqrt(e["precedence"] * e["pr_delta"])
-            if score >= threshold:
-                edges.append((e["a"], e["b"], score))
-
-    edges.sort(key=lambda x: -x[2])
-    return edges
-
-
-def format_graph_guidance(edges: list, causal_only: bool = False) -> str:
-    if not edges:
-        return ""
-    if causal_only:
-        lines = [
-            "# Causal Error Patterns (intervention-validated)",
-            "The following edges were validated via counterfactual patching experiments.",
-            "When you identify an error of type A in the trace, actively look for errors of type B,",
-            "as removing A causally reduces B's occurrence rate.",
-            "Higher values indicate stronger causal effect.",
-            "",
-            "Format: [Source Error] → [Consequent Error]  (causal effect: X.XX)",
-            "",
-        ]
-        for src, dst, w in edges:
-            lines.append(f"  {src} → {dst}  (causal effect: {w:.2f})")
-    else:
-        lines = [
-            "# Correlated Error Patterns (observational, precedence-filtered)",
-            "The following error pairs consistently co-occur with A preceding B across agent traces.",
-            "Score = geometric mean of precedence P(A precedes B | both occur) and probability-raising delta P(B|A)−P(B|¬A).",
-            "When you identify an error of type A in the trace, consider also checking for error type B.",
-            "Higher values indicate stronger observational association.",
-            "",
-            "Format: [Source Error] → [Consequent Error]  (observational score: X.XX)",
-            "",
-        ]
-        for src, dst, w in edges:
-            lines.append(f"  {src} → {dst}  (observational score: {w:.2f})")
-    lines.append("")
     return "\n".join(lines)
 
 
@@ -304,26 +236,57 @@ def main():
     parser.add_argument("--span_index",             action="store_true", default=False,
                         help="Prepend compact span_id index to each prompt")
     parser.add_argument("--causal_only",            action="store_true", default=False,
-                        help="Use only the 13 CAPRI-AIC validated causal edges")
+                        help="Use only the intervention-validated causal edges")
+    parser.add_argument("--corr_threshold",         type=float, default=1.0,
+                        help="Include causal + Suppes edges with geomean >= this "
+                             "(union semantics, matches the +GI / DeepInfra +CG sweep). "
+                             "Ignored if --causal_only.")
     parser.add_argument("--edge_threshold",         type=float, default=0.20,
-                        help="Min geomean score sqrt(P(B|A)*PR_delta) for observational edges (ignored if --causal_only)")
+                        help="Plain Suppes geomean threshold (NO causal union). "
+                             "Used only when neither --causal_only nor "
+                             "--corr_threshold<1.0 is set.")
+    parser.add_argument("--random_edges",           action="store_true",
+                        help="Random-N null baseline drawn from non-Suppes category pairs.")
+    parser.add_argument("--random_seed",            type=int, default=42)
+    parser.add_argument("--random_n",               type=int, default=12)
     parser.add_argument("--causal_graph",           type=str,   default=None,
-                        help=f"Path to capri_graph.json (default: {DEFAULT_CAUSAL_GRAPH})")
+                        help=f"Path to effect_edges.json (default: {DEFAULT_CAUSAL_GRAPH})")
     parser.add_argument("--suppes_graph",           type=str,   default=None,
                         help=f"Path to suppes_graph.json (default: {DEFAULT_SUPPES_GRAPH})")
     args = parser.parse_args()
 
     causal_graph = Path(args.causal_graph) if args.causal_graph else DEFAULT_CAUSAL_GRAPH
     suppes_graph = Path(args.suppes_graph) if args.suppes_graph else DEFAULT_SUPPES_GRAPH
-    edges = load_graph_edges(causal_only=args.causal_only, threshold=args.edge_threshold,
-                             causal_graph=causal_graph, suppes_graph=suppes_graph)
-    graph_guidance = format_graph_guidance(edges, causal_only=args.causal_only)
-    print(f"Loaded {len(edges)} edges ({'causal_only' if args.causal_only else f'geomean>={args.edge_threshold}'})")
+    edges = load_graph_edges(
+        threshold      = args.edge_threshold,
+        causal_only    = args.causal_only,
+        corr_threshold = args.corr_threshold,
+        causal_graph   = causal_graph,
+        suppes_graph   = suppes_graph,
+        random_edges   = args.random_edges,
+        random_seed    = args.random_seed,
+        random_n       = args.random_n,
+    )
+    if args.random_edges:
+        graph_tag = f"random{args.random_n}_seed{args.random_seed}"
+        desc = f"{len(edges)} random edges (seed={args.random_seed})"
+    elif args.causal_only:
+        graph_tag = "causal_only"
+        desc = f"{len(edges)} edges (causal_only)"
+    elif args.corr_threshold < 1.0:
+        graph_tag = f"causal_corr{args.corr_threshold}"
+        desc = f"{len(edges)} edges (causal + corr geomean>={args.corr_threshold})"
+    else:
+        graph_tag = f"t{args.edge_threshold}"
+        desc = f"{len(edges)} edges (geomean>={args.edge_threshold})"
+    print(f"Loaded {desc}")
+    graph_guidance = format_graph_guidance(
+        edges, causal_only=args.causal_only, random_edges=args.random_edges,
+    )
 
     model_tag = args.model.replace("/", "-")
-    graph_tag = "graph_causal_only" if args.causal_only else f"graph_t{args.edge_threshold}"
     span_tag  = "_span_index" if args.span_index else ""
-    out_dir = os.path.join(args.output_dir, f"outputs_{model_tag}-{args.split}-{graph_tag}{span_tag}")
+    out_dir = os.path.join(args.output_dir, f"outputs_{model_tag}-{args.split}-graph_{graph_tag}{span_tag}")
     os.makedirs(out_dir, exist_ok=True)
 
     data_dir = os.path.join(args.data_dir, args.split)

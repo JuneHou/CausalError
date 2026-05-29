@@ -52,7 +52,7 @@ done
 # IMPORTANT: --tensor_parallel_size 4 on A40s (KV cache otherwise OOMs at tp=2)
 # ============================================================
 for split in GAIA_dedup SWE_Bench_dedup; do
-  CUDA_VISIBLE_DEVICES=4,5,6,7 python eval/run_eval_with_graph_vllm.py \
+  CUDA_VISIBLE_DEVICES=0,1,2,3 python eval/run_eval_with_graph_vllm.py \
     --model Tongyi-Zhiwen/QwenLong-L1-32B \
     --split "$split" \
     --tensor_parallel_size 4 \
