@@ -204,6 +204,9 @@ def main():
     parser.add_argument("--max_model_len",          type=int, default=131072)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.75)
     parser.add_argument("--max_new_tokens",         type=int, default=8000)
+    parser.add_argument("--temperature",            type=float, default=0.0,
+                        help="Decoding temperature. >0 enables stochastic sampling; "
+                             "re-invoke the script multiple times to collect i.i.d. samples.")
     parser.add_argument("--enforce_eager",          action="store_true", default=True)
     parser.add_argument("--no_enforce_eager",       dest="enforce_eager", action="store_false")
     parser.add_argument("--span_index",             action="store_true", default=False,
@@ -254,7 +257,7 @@ def main():
         ) if is_qwen3_1m else {}),
     )
 
-    sp = SamplingParams(temperature=0.0, max_tokens=args.max_new_tokens)
+    sp = SamplingParams(temperature=args.temperature, max_tokens=args.max_new_tokens)
 
     skipped = 0
     for fp in tqdm(file_paths, position=0, leave=True):
@@ -286,7 +289,7 @@ def main():
         else:
             # Cap output tokens to what the context window can actually fit.
             _avail = args.max_model_len - tok_len
-            _sp = SamplingParams(temperature=0.0, max_tokens=min(args.max_new_tokens, _avail)) if _avail < args.max_new_tokens else sp
+            _sp = SamplingParams(temperature=args.temperature, max_tokens=min(args.max_new_tokens, _avail)) if _avail < args.max_new_tokens else sp
             try:
                 output = llm.generate([prompt_text], _sp)[0].outputs[0]
                 response = output.text

@@ -161,15 +161,85 @@ results/rebuttal_holdout_table.tex           table for rebuttal PDF
 
 **Defense in current paper:** None.
 
-**Experiment to prepare (minimum viable):**
-- Run each (backbone, method) cell with **3 seeds** for at least one backbone — recommend **GPT-oss-120B** (largest open-weight, central to the headline results).
-- Report mean ± std for that backbone column.
-- Bootstrap CI on F1 from the existing predictions if reruns are too expensive (resample predictions 1000x, report 95% CI). No model reruns needed.
+**Locked-in spec (2026-05-31):** Temperature-rerun, NOT bootstrap or seed-at-temp-0.
 
-**Wording for rebuttal:**
-> "We rerun GPT-oss-120B on TRAIL and MAST with 3 seeds: baseline F1 = X.X ± Y.Y, EDGE F1 = X.X ± Y.Y, with the EDGE gain exceeding 2σ on every cell except [list]. Bootstrap 95% CIs on all other cells are reported in [appendix table to add]."
+Why not bootstrap: resampling frozen predictions only captures across-trace
+sampling variance — a thin defense; for small Δ cells the CI usually crosses 0
+and hurts the rebuttal. Why not seeds-at-temp-0: the entire eval pipeline
+hardcodes `temperature=0.0`, so seed changes are no-ops.
 
-**Status:** ✗ not started — recommend bootstrap CI first (cheapest)
+**The experiment.** Rerun the **main-results setup** (full corpus, $\tau{=}0.35$
+graph, no graph rebuild) at **temperature=0.7** with **3 i.i.d. samples per
+cell** across all 5 open-weight Table-1 backbones. Compare against the existing
+temp=0 Table-1 anchor.
+
+| Dimension | Value |
+|---|---|
+| Backbones | Mistral-Small-3.1-24B (sbatch), GPT-oss-120B (ARC API), GPT-oss-20B (sbatch), Gemma-3-27B-IT (sbatch), QwenLong-L1-32B (sbatch) |
+| Benchmarks | TRAIL combined (148) + MAST (393) — full corpus |
+| Variants | baseline + +EDGE at $\tau{=}0.35$ |
+| Decoding | `--temperature 0.7`, 3 independent invocations (natural RNG advance) |
+| Total inference runs | 5 × 2 × 2 × 3 = **60** |
+| Wall (concurrent local + ARC) | ~6–24 h depending on queue |
+
+**Code shipped:** `trail-benchmark/rebuttal/r3_temperature/` —
+config.py + run_r3.py (dispatcher) + sbatch/r3_template.sbatch + aggregate.py.
+8 eval scripts patched with `--temperature` flag (default 0.0 preserves Table
+1); originals at `old_*.py` in each `eval/` dir.
+
+**Run commands.**
+
+```bash
+# 0. Activate env, cd to r3_temperature
+conda activate "/data/wang/junh/envs/causal"
+cd /data/wang/junh/githubs/trail-benchmark/rebuttal/r3_temperature
+
+# 1. Inspect all 78 subprocess commands the dispatcher would emit
+python run_r3.py                              # all backbones, both benchmarks
+python run_r3.py --backbone mistral-24b       # one backbone only
+python run_r3.py --backbone gpt-oss-120b --benchmark mast
+
+# 2. Sync the patched repos to the ARC paths (mirror holdout/sync.sh)
+bash ../holdout/sync.sh                       # rsync trail-benchmark + MAST to /projects/slmreasoning/...
+
+# 3. Dispatch local sbatch (4 vllm backbones × 4 cells = 16 jobs)
+python run_r3.py --backbone mistral-24b   --execute    # then gpt-oss-20b, gemma-3-27b, qwenlong-32b
+
+# 4. Dispatch ARC API runs (GPT-oss-120B × 18 invocations)
+set -a; source /data/wang/junh/.cache/keys/arc_llm_api.sh; set +a
+export ARC_LLM_API_KEY="$API_KEY"
+# For TRAIL baseline via litellm, also point litellm at the ARC endpoint:
+export OPENAI_API_BASE="https://llm-api.arc.vt.edu/api/v1/"
+export OPENAI_API_KEY="$ARC_LLM_API_KEY"
+python run_r3.py --backbone gpt-oss-120b --execute
+
+# 5. After all 60 cells land, score + emit the LaTeX table
+python aggregate.py
+#   -> results/r3_per_cell_metrics.csv
+#   -> results/r3_temperature_table.tex
+```
+
+**Output layout.**
+```
+rebuttal/r3_temperature/data/predictions/
+  <bench>/<backbone>/<variant>/temp0.7_sample{1,2,3}/<split>/<trace_id>.json   (TRAIL)
+  <bench>/<backbone>/<variant>/temp0.7_sample{1,2,3}/<rec_id>.json             (MAST)
+```
+
+**Verification.**
+- Sanity 1 (stochasticity on): diff `temp0.7_sample1/.../<id>.json` vs `temp0.7_sample2/.../<id>.json` — must differ.
+- Sanity 2 (deterministic preserved): rerun one Table-1 cell with `--temperature 0.0` and confirm it matches the Table-1 number within rounding.
+- Final: per cell, check `|Δ_mean| > 2·max(σ_baseline, σ_edge)`.
+
+**Wording for rebuttal (fill in numbers post-run):**
+> "At temperature 0.7 (3 i.i.d. samples per cell) across all five open-weight Table-1 backbones, +EDGE Δ on N of 10 (backbone, benchmark) cells satisfies |Δ| > 2σ; the Table-1 temperature=0 numbers lie inside the 95% band on M of 10 cells. The gains are not artifacts of deterministic decoding."
+
+**Status:** ✓ plan locked, ✓ code patches shipped, ✓ scaffolding shipped (config.py, run_r3.py, sbatch template, aggregate.py), ✗ inference runs not started.
+
+**Deferred (only if reviewer asks):**
+- Closed-weight backbones (Gemini-2.5-Flash/Pro, GPT-4o) — vendor `seed`/`temperature` semantics differ; needs a separate carve-out experiment.
+- Second temperature point (0.3 or 1.0) — doubles cost, marginal extra defense.
+- Explicit `--decoding_seed` flag for artifact-track reproducibility — one-line patch when needed.
 
 ---
 

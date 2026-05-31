@@ -490,6 +490,9 @@ def main():
     parser.add_argument("--max_model_len",          type=int,   default=131072)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.75)
     parser.add_argument("--max_new_tokens",         type=int,   default=8000)
+    parser.add_argument("--temperature",            type=float, default=0.0,
+                        help="Decoding temperature. >0 enables stochastic sampling; "
+                             "re-invoke the script multiple times to collect i.i.d. samples.")
     parser.add_argument("--enforce_eager",          action="store_true", default=True)
     parser.add_argument("--no_enforce_eager",       dest="enforce_eager", action="store_false")
     parser.add_argument("--causal_only",            action="store_true",
@@ -597,8 +600,8 @@ def main():
         gpu_memory_utilization = args.gpu_memory_utilization,
         enforce_eager          = args.enforce_eager,
     )
-    sp_p1 = SamplingParams(temperature=0.0, max_tokens=args.max_new_tokens)
-    sp_p2 = SamplingParams(temperature=0.0, max_tokens=args.max_new_tokens)
+    sp_p1 = SamplingParams(temperature=args.temperature, max_tokens=args.max_new_tokens)
+    sp_p2 = SamplingParams(temperature=args.temperature, max_tokens=args.max_new_tokens)
 
     # ------------------------------------------------------------------
     # Two-pass loop (sequential — Pass 2 depends on Pass 1 per trace)
@@ -649,7 +652,7 @@ def main():
             continue
 
         _avail = args.max_model_len - tok_len
-        _sp1 = SamplingParams(temperature=0.0, max_tokens=min(args.max_new_tokens, _avail))
+        _sp1 = SamplingParams(temperature=args.temperature, max_tokens=min(args.max_new_tokens, _avail))
         try:
             p1_raw = llm.generate([p1_prompt_text], _sp1)[0].outputs[0].text
         except Exception as e:
@@ -705,7 +708,7 @@ def main():
                     print(f"  [graph_inject] skipping Pass 2 for {trace_id}: prompt too long")
                     meta["pass2_error"] = "context_overflow"
                 else:
-                    _sp2 = SamplingParams(temperature=0.0, max_tokens=min(args.max_new_tokens, _avail_p2))
+                    _sp2 = SamplingParams(temperature=args.temperature, max_tokens=min(args.max_new_tokens, _avail_p2))
                     try:
                         p2_raw    = llm.generate([p2_prompt_text], _sp2)[0].outputs[0].text
                         p2_parsed = parse_json_output(p2_raw)

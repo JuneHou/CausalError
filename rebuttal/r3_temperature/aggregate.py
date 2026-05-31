@@ -1,0 +1,247 @@
+"""
+R3 aggregator — score the 60 temp=0.7 prediction dirs against full-corpus GT,
+plus the existing temp=0 anchor dirs, and emit per-cell mean ± std + Delta.
+
+For each (backbone, benchmark, variant):
+  - score temp=0.7_sample{1,2,3} prediction dirs
+  - score the existing temp=0 Table-1 prediction dir as anchor
+  - compute mean ± std across the 3 samples and the delta vs baseline
+
+TRAIL: per-split scoring (GAIA / SWE), pool by N. MAST: single annotation file.
+
+Usage:
+    python aggregate.py                       # score everything that exists
+    python aggregate.py --skip_anchor         # only score temp=0.7 reruns
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import statistics
+import subprocess
+import sys
+import tempfile
+import shutil
+from collections import defaultdict
+from pathlib import Path
+
+from config import (
+    BACKBONES, BENCHMARKS, TEMPERATURE, N_SAMPLES,
+    PREDICTIONS_DIR, RESULTS_DIR, TRAIL_ROOT, MAST_ROOT,
+    TRAIL_SCORER, MAST_SCORER, MAST_ANNOTATION,
+)
+
+
+# ----------------------------------------------------------------------------
+# Scorers
+# ----------------------------------------------------------------------------
+
+def _import_trail_scorer():
+    sys.path.insert(0, str(TRAIL_ROOT / "benchmarking" / "eval"))
+    import calculate_scores as _t
+    return _t.main
+
+
+def score_trail(pred_dir: Path) -> dict:
+    """pred_dir is expected to contain per-split subdirs (GAIA_dedup, SWE_Bench_dedup)
+    where each split holds {trace_id}.json prediction files. Returns pooled W-F1/Loc/Joint."""
+    trail_main = _import_trail_scorer()
+    bench_dir = TRAIL_ROOT / "benchmarking"
+    per_split_metrics: dict[str, dict] = {}
+    per_split_n: dict[str, int] = {}
+
+    for split_name in ("GAIA_dedup", "SWE_Bench_dedup"):
+        split_dir = pred_dir / split_name
+        # The eval script writes into <output_dir>/outputs_<model_tag>-<split>/
+        # so the actual prediction files live one level deeper. Find them:
+        if not split_dir.exists():
+            # Try nested layout: pred_dir/<split>/outputs_<model_tag>-<split>/
+            candidates = list(split_dir.parent.glob(f"*-{split_name}")) if split_dir.parent.exists() else []
+            if not candidates:
+                continue
+            split_dir = candidates[0]
+        gt_src = bench_dir / f"processed_annotations_{split_name.lower().replace('_dedup','').replace('swe_bench','swe_bench')}"
+        # processed_annotations_{gaia, swe_bench}
+        gt_key = "gaia" if "GAIA" in split_name else "swe_bench"
+        gt_src = bench_dir / f"processed_annotations_{gt_key}"
+        if not gt_src.exists():
+            print(f"  [trail] no GT dir at {gt_src}; skipping {split_name}")
+            continue
+        # Count pred files
+        pred_files = [f for f in split_dir.glob("*.json") if not f.name.startswith("_")]
+        if not pred_files:
+            continue
+        per_split_n[split_name] = len(pred_files)
+        # Stage GT + pred subset into a temp dir, then invoke scorer's main()
+        tmp = Path(tempfile.mkdtemp(prefix=f"trail_score_{split_name}_"))
+        gt_sub = tmp / "gt"; pred_sub = tmp / "pred"
+        gt_sub.mkdir(); pred_sub.mkdir()
+        for f in pred_files:
+            gt_file = gt_src / f.name
+            if not gt_file.exists():
+                continue
+            shutil.copy2(f, pred_sub / f.name)
+            shutil.copy2(gt_file, gt_sub / f.name)
+        cwd = Path.cwd()
+        try:
+            os.chdir(bench_dir)
+            res = trail_main(ground_truth_dir=str(gt_sub), generated_dir=str(pred_sub))
+        finally:
+            os.chdir(cwd)
+        if not res:
+            continue
+        per_split_metrics[split_name] = {
+            "weighted_f1": res.get("weighted_f1"),
+            "loc":         res.get("location_accuracy"),
+            "joint":       res.get("joint_accuracy"),
+        }
+    if not per_split_metrics:
+        return {}
+    pooled = {}
+    for metric in ("weighted_f1", "loc", "joint"):
+        num, den = 0.0, 0
+        for split, m in per_split_metrics.items():
+            v = m.get(metric)
+            if v is not None:
+                num += v * per_split_n[split]
+                den += per_split_n[split]
+        if den:
+            pooled[metric] = num / den
+    return pooled
+
+
+def score_mast(pred_dir: Path) -> dict:
+    """Resolve a single layer of nesting if the eval script wrote
+    <pred_dir>/<model_tag>-yesno-...-{baseline,graph-inject-tau}/{rec_id}.json."""
+    target = pred_dir
+    rec_files = [f for f in target.glob("*.json") if f.name[:4].isdigit()]
+    if not rec_files:
+        subdirs = [d for d in target.iterdir() if d.is_dir()]
+        for sub in subdirs:
+            if list(sub.glob("[0-9][0-9][0-9][0-9].json")):
+                target = sub
+                break
+    cmd = [
+        sys.executable, str(MAST_SCORER),
+        "--annotation", str(MAST_ANNOTATION),
+        "--pred_dir", str(target),
+    ]
+    r = subprocess.run(cmd, cwd=MAST_ROOT, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"  [mast] scorer failed on {target}: {r.stderr[:200]}")
+        return {}
+    # Scorer writes a -metrics.json next to pred_dir; parse it directly.
+    metrics_file = Path(f"{target}-metrics.json")
+    if not metrics_file.exists():
+        return {}
+    with open(metrics_file) as f:
+        m = json.load(f)
+    return {
+        "weighted_f1": m.get("weighted_f1"),
+        "macro_f1":    m.get("macro_f1"),
+    }
+
+
+# ----------------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--skip_anchor", action="store_true",
+                    help="Skip rescoring the existing temp=0 Table-1 prediction dirs.")
+    args = ap.parse_args()
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    rows = []
+
+    for bb_key in BACKBONES:
+        for benchmark in BENCHMARKS:
+            for variant in ("baseline", "edge"):
+                # temp=0.7 samples
+                f1s = []
+                for sample_idx in range(1, N_SAMPLES + 1):
+                    pred_dir = PREDICTIONS_DIR / benchmark / bb_key / variant / f"temp{TEMPERATURE}_sample{sample_idx}"
+                    if not pred_dir.exists():
+                        continue
+                    if benchmark == "trail":
+                        m = score_trail(pred_dir)
+                    else:
+                        m = score_mast(pred_dir)
+                    if not m:
+                        continue
+                    rows.append({
+                        "backbone": bb_key, "benchmark": benchmark, "variant": variant,
+                        "scope": f"temp{TEMPERATURE}_sample{sample_idx}",
+                        **m,
+                    })
+                    if m.get("weighted_f1") is not None:
+                        f1s.append(m["weighted_f1"])
+                # mean ± std
+                if len(f1s) >= 2:
+                    rows.append({
+                        "backbone": bb_key, "benchmark": benchmark, "variant": variant,
+                        "scope":      f"temp{TEMPERATURE}_mean",
+                        "weighted_f1": statistics.mean(f1s),
+                        "weighted_f1_std": statistics.stdev(f1s),
+                        "n_samples":  len(f1s),
+                    })
+
+    csv_path = RESULTS_DIR / "r3_per_cell_metrics.csv"
+    fields = ["backbone", "benchmark", "variant", "scope",
+              "weighted_f1", "weighted_f1_std", "n_samples", "loc", "joint", "macro_f1"]
+    with open(csv_path, "w") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in fields})
+    print(f"wrote {csv_path}")
+
+    # ------- Build a compact LaTeX table: per (bb, bench) report Delta-mean and std -------
+    by_cell = defaultdict(dict)
+    for r in rows:
+        by_cell[(r["backbone"], r["benchmark"])][(r["variant"], r["scope"])] = r
+
+    lines = [
+        r"\begin{table}[!tbp]",
+        r"\centering \footnotesize",
+        r"\begin{tabular}{l l c c c}",
+        r"\toprule",
+        r"\textbf{Backbone} & \textbf{Benchmark} & "
+        r"Base $\mu\pm\sigma$ & +EDGE $\mu\pm\sigma$ & $\Delta$ \\",
+        r"\midrule",
+    ]
+    for bb_key in BACKBONES:
+        for benchmark in BENCHMARKS:
+            c = by_cell.get((bb_key, benchmark), {})
+            mb = c.get(("baseline", f"temp{TEMPERATURE}_mean"), {})
+            me = c.get(("edge",     f"temp{TEMPERATURE}_mean"), {})
+            base_mu  = mb.get("weighted_f1");  base_sd = mb.get("weighted_f1_std")
+            edge_mu  = me.get("weighted_f1");  edge_sd = me.get("weighted_f1_std")
+            if base_mu is None or edge_mu is None:
+                continue
+            d = edge_mu - base_mu
+            lines.append(
+                f"{bb_key} & {benchmark.upper()} & "
+                f"{base_mu*100:.1f}$\\pm${base_sd*100:.1f} & "
+                f"{edge_mu*100:.1f}$\\pm${edge_sd*100:.1f} & "
+                f"{d*100:+.1f} \\\\"
+            )
+    lines += [
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\caption{R3 temperature robustness. Weighted F1 (\%) at "
+        f"temperature {TEMPERATURE} averaged across {N_SAMPLES} i.i.d. samples.}}",
+        r"\label{tab:r3_temperature}",
+        r"\end{table}",
+    ]
+    tex_path = RESULTS_DIR / "r3_temperature_table.tex"
+    with open(tex_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"wrote {tex_path}")
+
+
+if __name__ == "__main__":
+    main()

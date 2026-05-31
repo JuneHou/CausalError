@@ -137,7 +137,7 @@ The data to analyze is as follows:
     return prompt.format(trace=trace)
 
 
-def call_litellm(trace: str, model: str = "openai/gpt-4o"):
+def call_litellm(trace: str, model: str = "openai/gpt-4o", temperature: float = 0.0):
     prompt = get_prompt(trace)
 
     if (
@@ -157,7 +157,7 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o"):
         params = {
             "messages": [{"role": "user", "content": prompt}],
             "model": model,
-            "temperature": 0.0,
+            "temperature": temperature,
             "top_p": 1,
             "reasoning_effort": None,
             "drop_params": True,
@@ -174,7 +174,7 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o"):
     raise Exception("Exceeded 5 retries due to rate limiting")
 
 
-def process_file(file_path, output_dir, model):
+def process_file(file_path, output_dir, model, temperature: float = 0.0):
     output_file = f"{output_dir}/{file_path.split('/')[-1]}"
     if os.path.exists(output_file):
         return file_path  # already done, skip
@@ -183,7 +183,7 @@ def process_file(file_path, output_dir, model):
         trace = f.read()
 
     try:
-        response = call_litellm(trace=trace, model=model)
+        response = call_litellm(trace=trace, model=model, temperature=temperature)
     except ContextWindowExceededError as e:
         print(
             f"Context window excceded for trace: {file_path}: {e}. Creating empty output file."
@@ -207,11 +207,12 @@ def run_eval(
     output_dir: str = "output",
     model: str = "openai/gpt-4o",
     max_workers=1,
+    temperature: float = 0.0,
 ):
     file_paths = glob.glob(f"{directory}/*.json")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(process_file, file_path, output_dir, model)
+            executor.submit(process_file, file_path, output_dir, model, temperature)
             for file_path in file_paths
         ]
         for future in tqdm(
@@ -252,6 +253,13 @@ def main():
         default="GAIA",
         help="Split of the dataset to evaluate (`GAIA` or `SWE Bench`)",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Decoding temperature. >0 enables stochastic sampling; "
+             "re-invoke the script multiple times to collect i.i.d. samples.",
+    )
     args = parser.parse_args()
     directory_containing_dataset = args.data_dir
 
@@ -265,6 +273,7 @@ def main():
         f"{args.output_dir}/outputs_{args.model.replace('/', '-')}-{args.split}",
         model=args.model,
         max_workers=args.max_workers,
+        temperature=args.temperature,
     )
 
 if __name__ == "__main__":
