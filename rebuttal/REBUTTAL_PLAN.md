@@ -189,23 +189,38 @@ config.py + run_r3.py (dispatcher) + sbatch/r3_template.sbatch + aggregate.py.
 
 **Run commands.**
 
+`run_r3.py` has two modes for vllm backbones:
+- default — emits sbatch invocations (for ARC / Slurm clusters).
+- `--local` — emits raw python commands (no sbatch wrapper); caller controls
+  `CUDA_VISIBLE_DEVICES`. Use this for Mistral on the local 4×A100 box.
+
 ```bash
 # 0. Activate env, cd to r3_temperature
 conda activate "/data/wang/junh/envs/causal"
 cd /data/wang/junh/githubs/trail-benchmark/rebuttal/r3_temperature
 
 # 1. Inspect all 78 subprocess commands the dispatcher would emit
-python run_r3.py                              # all backbones, both benchmarks
-python run_r3.py --backbone mistral-24b       # one backbone only
+python run_r3.py                              # default: sbatch for vllm + & for ARC
+python run_r3.py --backbone mistral-24b --local   # raw python cmds (local)
 python run_r3.py --backbone gpt-oss-120b --benchmark mast
 
-# 2. Sync the patched repos to the ARC paths (mirror holdout/sync.sh)
+# 2a. LOCAL — run Mistral on this machine (4×A100). 18 commands per backbone
+#     (TRAIL 2 splits × 2 variants × 3 samples = 12; MAST 2 × 3 = 6).
+#     Each python process loads the model once and processes all prompts in
+#     that split serially under temperature=0.7; reinvoking gives the next
+#     i.i.d. sample.
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+python run_r3.py --backbone mistral-24b --local --execute
+# OR pipe to bash if you'd rather watch the commands stream:
+#   python run_r3.py --backbone mistral-24b --local | bash
+
+# 2b. ARC — sync repos then sbatch the other open-weight backbones
 bash ../holdout/sync.sh                       # rsync trail-benchmark + MAST to /projects/slmreasoning/...
+python run_r3.py --backbone gpt-oss-20b --execute
+python run_r3.py --backbone gemma-3-27b --execute
+python run_r3.py --backbone qwenlong-32b --execute
 
-# 3. Dispatch local sbatch (4 vllm backbones × 4 cells = 16 jobs)
-python run_r3.py --backbone mistral-24b   --execute    # then gpt-oss-20b, gemma-3-27b, qwenlong-32b
-
-# 4. Dispatch ARC API runs (GPT-oss-120B × 18 invocations)
+# 3. ARC API runs (GPT-oss-120B × 18 invocations, runs as background processes)
 set -a; source /data/wang/junh/.cache/keys/arc_llm_api.sh; set +a
 export ARC_LLM_API_KEY="$API_KEY"
 # For TRAIL baseline via litellm, also point litellm at the ARC endpoint:
@@ -213,7 +228,7 @@ export OPENAI_API_BASE="https://llm-api.arc.vt.edu/api/v1/"
 export OPENAI_API_KEY="$ARC_LLM_API_KEY"
 python run_r3.py --backbone gpt-oss-120b --execute
 
-# 5. After all 60 cells land, score + emit the LaTeX table
+# 4. After all 60 cells land, score + emit the LaTeX table
 python aggregate.py
 #   -> results/r3_per_cell_metrics.csv
 #   -> results/r3_temperature_table.tex

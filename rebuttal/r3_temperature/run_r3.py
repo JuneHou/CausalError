@@ -203,6 +203,10 @@ def main():
     ap.add_argument("--benchmark", choices=list(BENCHMARKS.keys()) + ["all"], default="all")
     ap.add_argument("--execute", action="store_true",
                     help="Actually run sbatch / launch background; default just prints.")
+    ap.add_argument("--local", action="store_true",
+                    help="For vllm backbones, emit raw python commands instead of sbatch "
+                         "wrappers (use when running on a local machine, not Slurm). "
+                         "Caller is responsible for CUDA_VISIBLE_DEVICES.")
     args = ap.parse_args()
 
     only_bb = None if args.backbone == "all" else args.backbone
@@ -210,18 +214,25 @@ def main():
 
     for bb_key, bb, benchmark, variant, sample_idx in all_cells(only_bb, only_bm):
         cmds = build_commands(bb_key, bb, benchmark, variant, sample_idx)
-        if bb["backend"] == "vllm":
+        if bb["backend"] == "vllm" and not args.local:
             line = emit_sbatch(bb_key, bb, benchmark, variant, sample_idx, cmds)
             print(line)
             if args.execute:
                 subprocess.run(line, shell=True, check=False)
         else:
-            # ARC: launch each command directly in the background
+            # Local vllm or ARC: emit raw python commands. ARC ones get
+            # backgrounded with & so they can run in parallel; local vllm
+            # commands run serially in the caller's shell (model loads once
+            # per process but vLLM batches all prompts in that process).
+            suffix = " &" if bb["backend"] == "api" else ""
             for cmd in cmds:
-                line = " ".join(cmd) + " &"
+                line = " ".join(cmd) + suffix
                 print(line)
                 if args.execute:
-                    subprocess.Popen(cmd)
+                    if bb["backend"] == "api":
+                        subprocess.Popen(cmd)
+                    else:
+                        subprocess.run(cmd, check=False)
 
 
 if __name__ == "__main__":
