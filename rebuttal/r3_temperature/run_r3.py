@@ -48,6 +48,7 @@ def _trail_vllm_cmd(bb, variant: str, sample_idx: int, split: str) -> list[str]:
         "--data_dir", str(TRAIL_ROOT / "benchmarking" / "data"),
         "--output_dir", str(out.parent),     # script appends a model_tag subdir
         "--temperature", str(TEMPERATURE),
+        "--seed", str(sample_idx),
         "--tensor_parallel_size", str(bb["tensor_parallel_size"]),
         "--gpu_memory_utilization", str(bb["gpu_memory_utilization"]),
         "--max_model_len", str(bb["max_model_len_trail"]),
@@ -77,6 +78,7 @@ def _trail_arc_cmd(bb, variant: str, sample_idx: int, split: str) -> list[str]:
             "--data_dir", str(TRAIL_ROOT / "benchmarking" / "data"),
             "--output_dir", str(out.parent),
             "--temperature", str(TEMPERATURE),
+            "--seed", str(sample_idx),
         ]
     return [
         sys.executable,
@@ -87,6 +89,7 @@ def _trail_arc_cmd(bb, variant: str, sample_idx: int, split: str) -> list[str]:
         "--data_dir", str(TRAIL_ROOT / "benchmarking" / "data"),
         "--output_dir", str(out.parent),
         "--temperature", str(TEMPERATURE),
+        "--seed", str(sample_idx),
         "--corr_threshold", str(CORR_THRESHOLD),
         "--span_index",
         "--suppes_graph", BENCHMARKS["trail"]["suppes_graph"],
@@ -105,6 +108,7 @@ def _mast_vllm_cmd(bb, variant: str, sample_idx: int) -> list[str]:
             "--input", str(BENCHMARKS["mast"]["input"]) if False else BENCHMARKS["mast"]["input"],
             "--output_dir", str(out),
             "--temperature", str(TEMPERATURE),
+            "--seed", str(sample_idx),
             "--edge_threshold", str(CORR_THRESHOLD),
             "--suppes_graph", BENCHMARKS["mast"]["suppes_graph"],
             "--effect_edges", BENCHMARKS["mast"]["effect_edges"],
@@ -119,6 +123,7 @@ def _mast_vllm_cmd(bb, variant: str, sample_idx: int) -> list[str]:
         "--input", BENCHMARKS["mast"]["input"],
         "--output_dir", str(out),
         "--temperature", str(TEMPERATURE),
+        "--seed", str(sample_idx),
         "--max_model_len", str(bb["max_model_len_mast"]),
         "--gpu_memory_utilization", str(bb["gpu_memory_utilization"]),
         "--tp", str(bb["tensor_parallel_size"]),
@@ -136,6 +141,7 @@ def _mast_arc_cmd(bb, variant: str, sample_idx: int) -> list[str]:
             "--input", BENCHMARKS["mast"]["input"],
             "--output_dir", str(out),
             "--temperature", str(TEMPERATURE),
+            "--seed", str(sample_idx),
             "--edge_threshold", str(CORR_THRESHOLD),
             "--suppes_graph", BENCHMARKS["mast"]["suppes_graph"],
             "--effect_edges", BENCHMARKS["mast"]["effect_edges"],
@@ -147,6 +153,7 @@ def _mast_arc_cmd(bb, variant: str, sample_idx: int) -> list[str]:
         "--input", BENCHMARKS["mast"]["input"],
         "--output_dir", str(out),
         "--temperature", str(TEMPERATURE),
+        "--seed", str(sample_idx),
     ]
 
 

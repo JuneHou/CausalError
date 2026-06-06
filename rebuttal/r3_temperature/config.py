@@ -14,8 +14,8 @@ Scope (locked 2026-05-31):
 from pathlib import Path
 
 # ---------- repo roots ----------
-TRAIL_ROOT = Path("/data/wang/junh/githubs/trail-benchmark")
-MAST_ROOT  = Path("/data/wang/junh/githubs/MAST")
+TRAIL_ROOT = Path("/projects/slmreasoning/junh/causal-error/CausalError")
+MAST_ROOT  = Path("/projects/slmreasoning/junh/causal-error/CausalMAST")
 R3_ROOT    = TRAIL_ROOT / "rebuttal" / "r3_temperature"
 
 # ---------- experiment dials ----------
