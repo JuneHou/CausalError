@@ -122,7 +122,7 @@ class RateLimiter:
 # API call wrapper
 # ---------------------------------------------------------------------------
 
-def call_chat(client, model, user_text, max_tokens, limiter, max_retries=5, temperature=0.0):
+def call_chat(client, model, user_text, max_tokens, limiter, max_retries=5, temperature=0.0, seed=0):
     messages = [{"role": "user", "content": user_text}]
     last_err = None
     for attempt in range(max_retries):
@@ -133,6 +133,7 @@ def call_chat(client, model, user_text, max_tokens, limiter, max_retries=5, temp
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                seed=seed,
             )
             return resp.choices[0].message.content or ""
         except Exception as e:
@@ -166,6 +167,9 @@ def main():
     ap.add_argument("--temperature",           type=float, default=0.0,
                     help="Decoding temperature. >0 enables stochastic sampling; "
                          "re-invoke the script multiple times to collect i.i.d. samples.")
+    ap.add_argument("--seed",                  type=int, default=0,
+                    help="Per-request sampling seed; pass distinct values across "
+                         "invocations to obtain i.i.d. samples at temperature>0.")
     ap.add_argument("--model_tag",             default=None)
     ap.add_argument("--causal_only",           action="store_true")
     ap.add_argument("--corr_threshold",        type=float, default=1.0,
@@ -315,7 +319,7 @@ def main():
                                           graph_guidance=graph_guidance)
         try:
             p1_raw = call_chat(client, args.model, p1_user_text,
-                               args.max_tokens, limiter, temperature=args.temperature)
+                               args.max_tokens, limiter, temperature=args.temperature, seed=args.seed)
         except Exception as e:
             print(f"\n  [Pass 1] error for {trace_id}: {e}")
             with open(out_file, "w") as f:
@@ -363,7 +367,7 @@ def main():
                 )
                 try:
                     p2_raw    = call_chat(client, args.model, p2_user_text,
-                                         args.max_tokens, limiter, temperature=args.temperature)
+                                         args.max_tokens, limiter, temperature=args.temperature, seed=args.seed)
                     p2_parsed = parse_json_output(p2_raw)
                     if p2_parsed is None:
                         print(f"  [graph_inject] JSON parse FAILED for {trace_id}")

@@ -207,9 +207,9 @@ def main():
     parser.add_argument("--temperature",            type=float, default=0.0,
                         help="Decoding temperature. >0 enables stochastic sampling; "
                              "re-invoke the script multiple times to collect i.i.d. samples.")
-    parser.add_argument("--seed",                   type=int, default=None,
-                        help="vLLM sampling seed. Set a distinct value per sample for "
-                             "reproducible-yet-distinct i.i.d. draws; None = nondeterministic.")
+    parser.add_argument("--seed",                   type=int, default=0,
+                        help="Per-request sampling seed; pass distinct values across "
+                             "invocations to obtain i.i.d. samples at temperature>0.")
     parser.add_argument("--enforce_eager",          action="store_true", default=True)
     parser.add_argument("--no_enforce_eager",       dest="enforce_eager", action="store_false")
     parser.add_argument("--span_index",             action="store_true", default=False,

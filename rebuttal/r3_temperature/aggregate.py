@@ -53,17 +53,22 @@ def score_trail(pred_dir: Path) -> dict:
     per_split_n: dict[str, int] = {}
 
     for split_name in ("GAIA_dedup", "SWE_Bench_dedup"):
-        split_dir = pred_dir / split_name
-        # The eval script writes into <output_dir>/outputs_<model_tag>-<split>/
-        # so the actual prediction files live one level deeper. Find them:
-        if not split_dir.exists():
-            # Try nested layout: pred_dir/<split>/outputs_<model_tag>-<split>/
-            candidates = list(split_dir.parent.glob(f"*-{split_name}")) if split_dir.parent.exists() else []
-            if not candidates:
+        # The eval scripts write into pred_dir/outputs_<model_tag>-<split>[-suffix]/
+        # (run_r3.py also pre-creates an empty pred_dir/<split>/ placeholder). Find
+        # the outputs_*<split>* subdir that actually contains json files.
+        candidates = [
+            d for d in pred_dir.glob(f"outputs_*{split_name}*")
+            if d.is_dir() and any(f for f in d.glob("*.json") if not f.name.startswith("_"))
+        ]
+        if not candidates:
+            # Fall back to the bare split dir if someone wrote files there directly.
+            bare = pred_dir / split_name
+            if bare.exists() and any(f for f in bare.glob("*.json") if not f.name.startswith("_")):
+                split_dir = bare
+            else:
                 continue
+        else:
             split_dir = candidates[0]
-        gt_src = bench_dir / f"processed_annotations_{split_name.lower().replace('_dedup','').replace('swe_bench','swe_bench')}"
-        # processed_annotations_{gaia, swe_bench}
         gt_key = "gaia" if "GAIA" in split_name else "swe_bench"
         gt_src = bench_dir / f"processed_annotations_{gt_key}"
         if not gt_src.exists():
@@ -148,6 +153,49 @@ def score_mast(pred_dir: Path) -> dict:
 # Main
 # ----------------------------------------------------------------------------
 
+def _trail_sample_complete(pred_dir: Path) -> bool:
+    """Sample is complete iff both GAIA (117) and SWE (31) splits have full trace files."""
+    EXPECTED = {"GAIA_dedup": 117, "SWE_Bench_dedup": 31}
+    for split, n_expected in EXPECTED.items():
+        cands = [
+            d for d in pred_dir.glob(f"outputs_*{split}*")
+            if d.is_dir() and any(f for f in d.glob("*.json") if not f.name.startswith("_"))
+        ]
+        if not cands:
+            return False
+        n_have = len([f for f in cands[0].glob("*.json") if not f.name.startswith("_")])
+        if n_have < n_expected:
+            return False
+    return True
+
+
+def _mast_sample_complete(pred_dir: Path) -> bool:
+    """Sample is complete iff the MAST subdir has all 393 trace files."""
+    EXPECTED = 393
+    cands = [d for d in pred_dir.iterdir() if d.is_dir()] if pred_dir.exists() else []
+    for sub in cands:
+        n = len(list(sub.glob("[0-9][0-9][0-9][0-9].json")))
+        if n >= EXPECTED:
+            return True
+    # Top-level fallback
+    return len(list(pred_dir.glob("[0-9][0-9][0-9][0-9].json"))) >= EXPECTED
+
+
+def _cell_complete(benchmark: str, bb_key: str, variant: str) -> bool:
+    """All 3 samples present AND fully populated."""
+    checker = _trail_sample_complete if benchmark == "trail" else _mast_sample_complete
+    for sample_idx in range(1, N_SAMPLES + 1):
+        pred_dir = PREDICTIONS_DIR / benchmark / bb_key / variant / f"temp{TEMPERATURE}_sample{sample_idx}"
+        if not pred_dir.exists() or not checker(pred_dir):
+            return False
+    return True
+
+
+# Reject a "mean" row whose 3 samples are byte-identical (σ ≈ 0 from
+# unpatched seed) — that's not a variance estimate.
+SIGMA_FLOOR = 1e-5
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip_anchor", action="store_true",
@@ -156,16 +204,18 @@ def main():
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     rows = []
+    skipped = []  # (bb, bench, variant, reason)
 
     for bb_key in BACKBONES:
         for benchmark in BENCHMARKS:
             for variant in ("baseline", "edge"):
+                if not _cell_complete(benchmark, bb_key, variant):
+                    skipped.append((bb_key, benchmark, variant, "incomplete: missing samples or split"))
+                    continue
                 # temp=0.7 samples
                 f1s = []
                 for sample_idx in range(1, N_SAMPLES + 1):
                     pred_dir = PREDICTIONS_DIR / benchmark / bb_key / variant / f"temp{TEMPERATURE}_sample{sample_idx}"
-                    if not pred_dir.exists():
-                        continue
                     if benchmark == "trail":
                         m = score_trail(pred_dir)
                     else:
@@ -179,15 +229,22 @@ def main():
                     })
                     if m.get("weighted_f1") is not None:
                         f1s.append(m["weighted_f1"])
-                # mean ± std
-                if len(f1s) >= 2:
-                    rows.append({
-                        "backbone": bb_key, "benchmark": benchmark, "variant": variant,
-                        "scope":      f"temp{TEMPERATURE}_mean",
-                        "weighted_f1": statistics.mean(f1s),
-                        "weighted_f1_std": statistics.stdev(f1s),
-                        "n_samples":  len(f1s),
-                    })
+                if len(f1s) < N_SAMPLES:
+                    skipped.append((bb_key, benchmark, variant,
+                                    f"scorer produced {len(f1s)}/{N_SAMPLES} samples"))
+                    continue
+                sd = statistics.stdev(f1s)
+                if sd < SIGMA_FLOOR:
+                    skipped.append((bb_key, benchmark, variant,
+                                    f"sigma={sd:.2e} below floor (seed didn't vary)"))
+                    continue
+                rows.append({
+                    "backbone": bb_key, "benchmark": benchmark, "variant": variant,
+                    "scope":      f"temp{TEMPERATURE}_mean",
+                    "weighted_f1": statistics.mean(f1s),
+                    "weighted_f1_std": sd,
+                    "n_samples":  len(f1s),
+                })
 
     csv_path = RESULTS_DIR / "r3_per_cell_metrics.csv"
     fields = ["backbone", "benchmark", "variant", "scope",
@@ -213,15 +270,17 @@ def main():
         r"Base $\mu\pm\sigma$ & +EDGE $\mu\pm\sigma$ & $\Delta$ \\",
         r"\midrule",
     ]
+    emitted = 0
     for bb_key in BACKBONES:
         for benchmark in BENCHMARKS:
             c = by_cell.get((bb_key, benchmark), {})
-            mb = c.get(("baseline", f"temp{TEMPERATURE}_mean"), {})
-            me = c.get(("edge",     f"temp{TEMPERATURE}_mean"), {})
-            base_mu  = mb.get("weighted_f1");  base_sd = mb.get("weighted_f1_std")
-            edge_mu  = me.get("weighted_f1");  edge_sd = me.get("weighted_f1_std")
-            if base_mu is None or edge_mu is None:
+            mb = c.get(("baseline", f"temp{TEMPERATURE}_mean"))
+            me = c.get(("edge",     f"temp{TEMPERATURE}_mean"))
+            # Both baseline AND edge must have passed the completeness + sigma check
+            if mb is None or me is None:
                 continue
+            base_mu, base_sd = mb["weighted_f1"], mb["weighted_f1_std"]
+            edge_mu, edge_sd = me["weighted_f1"], me["weighted_f1_std"]
             d = edge_mu - base_mu
             lines.append(
                 f"{bb_key} & {benchmark.upper()} & "
@@ -229,6 +288,7 @@ def main():
                 f"{edge_mu*100:.1f}$\\pm${edge_sd*100:.1f} & "
                 f"{d*100:+.1f} \\\\"
             )
+            emitted += 1
     lines += [
         r"\bottomrule",
         r"\end{tabular}",
@@ -240,7 +300,12 @@ def main():
     tex_path = RESULTS_DIR / "r3_temperature_table.tex"
     with open(tex_path, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"wrote {tex_path}")
+    print(f"wrote {tex_path}  ({emitted} cells emitted)")
+
+    if skipped:
+        print(f"\nSkipped {len(skipped)} (backbone, benchmark, variant) cells:")
+        for bb, bm, va, reason in skipped:
+            print(f"  - {bb}/{bm}/{va}: {reason}")
 
 
 if __name__ == "__main__":

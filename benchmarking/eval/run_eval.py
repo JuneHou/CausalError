@@ -137,7 +137,7 @@ The data to analyze is as follows:
     return prompt.format(trace=trace)
 
 
-def call_litellm(trace: str, model: str = "openai/gpt-4o", temperature: float = 0.0):
+def call_litellm(trace: str, model: str = "openai/gpt-4o", temperature: float = 0.0, seed: int = 0):
     prompt = get_prompt(trace)
 
     if (
@@ -159,6 +159,7 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o", temperature: float = 
             "model": model,
             "temperature": temperature,
             "top_p": 1,
+            "seed": seed,
             "reasoning_effort": None,
             "drop_params": True,
         }
@@ -174,7 +175,7 @@ def call_litellm(trace: str, model: str = "openai/gpt-4o", temperature: float = 
     raise Exception("Exceeded 5 retries due to rate limiting")
 
 
-def process_file(file_path, output_dir, model, temperature: float = 0.0):
+def process_file(file_path, output_dir, model, temperature: float = 0.0, seed: int = 0):
     output_file = f"{output_dir}/{file_path.split('/')[-1]}"
     if os.path.exists(output_file):
         return file_path  # already done, skip
@@ -183,7 +184,7 @@ def process_file(file_path, output_dir, model, temperature: float = 0.0):
         trace = f.read()
 
     try:
-        response = call_litellm(trace=trace, model=model, temperature=temperature)
+        response = call_litellm(trace=trace, model=model, temperature=temperature, seed=seed)
     except ContextWindowExceededError as e:
         print(
             f"Context window excceded for trace: {file_path}: {e}. Creating empty output file."
@@ -208,11 +209,12 @@ def run_eval(
     model: str = "openai/gpt-4o",
     max_workers=1,
     temperature: float = 0.0,
+    seed: int = 0,
 ):
     file_paths = glob.glob(f"{directory}/*.json")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(process_file, file_path, output_dir, model, temperature)
+            executor.submit(process_file, file_path, output_dir, model, temperature, seed)
             for file_path in file_paths
         ]
         for future in tqdm(
@@ -260,6 +262,13 @@ def main():
         help="Decoding temperature. >0 enables stochastic sampling; "
              "re-invoke the script multiple times to collect i.i.d. samples.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Per-request sampling seed; pass distinct values across invocations "
+             "to obtain i.i.d. samples at temperature>0.",
+    )
     args = parser.parse_args()
     directory_containing_dataset = args.data_dir
 
@@ -274,6 +283,7 @@ def main():
         model=args.model,
         max_workers=args.max_workers,
         temperature=args.temperature,
+        seed=args.seed,
     )
 
 if __name__ == "__main__":
