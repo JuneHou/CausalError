@@ -32,7 +32,10 @@ R3_ROOT    = TRAIL_ROOT / "rebuttal" / "r3_temperature"
 # ---------- experiment dials ----------
 TEMPERATURE = 0.7
 N_SAMPLES   = 3
-CORR_THRESHOLD = 0.35
+CORR_THRESHOLD      = 0.35   # TRAIL +EDGE geomean threshold (matches main table)
+MAST_EDGE_THRESHOLD = 0.50   # MAST  +EDGE geomean threshold (main table is τ=0.50).
+                             # τ is a PURE Suppes geomean cut; it is NOT unioned with
+                             # the causal-only graph — that is a separate variant.
 
 # ---------- eval entry points ----------
 # TRAIL
@@ -54,8 +57,9 @@ MAST_SCORER                = MAST_ROOT / "eval" / "calculate_scores_yesno.py"
 TRAIL_SUPPES_GRAPH = TRAIL_ROOT / "benchmarking" / "data" / "trail_causal_outputs_full_gaia_swe_AIC" / "suppes_graph.json"
 TRAIL_EFFECT_EDGES = TRAIL_ROOT / "benchmarking" / "outputs" / "interventions_full_gaia_swe_merged" / "effect_edges.json"
 
-# MAST: tau=0.35 corr-union (the "+EDGE" headline in MAST sbatch uses --edge_threshold 0.35
-# with these two graph files; see rebuttal/holdout/sbatch/run_holdout_gpt_oss_120b_mast.sbatch for layout).
+# MAST: +EDGE is a pure Suppes geomean threshold at MAST_EDGE_THRESHOLD (τ=0.50), built
+# from suppes_graph.json only. effect_edges.json is passed but consumed solely by the
+# separate --causal_only variant; the τ-thresholded graph does NOT union with it.
 MAST_SUPPES_GRAPH  = MAST_ROOT / "causal_graph" / "outputs" / "suppes_graph.json"
 MAST_EFFECT_EDGES  = MAST_ROOT / "causal_graph" / "outputs" / "interventions" / "effect_edges.json"
 

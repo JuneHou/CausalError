@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 from config import (
-    BACKBONES, BENCHMARKS, TEMPERATURE, N_SAMPLES, CORR_THRESHOLD,
+    BACKBONES, BENCHMARKS, TEMPERATURE, N_SAMPLES, CORR_THRESHOLD, MAST_EDGE_THRESHOLD,
     R3_ROOT, TRAIL_ROOT, MAST_ROOT, PREDICTIONS_DIR,
     TRAIL_BASELINE_SCRIPT_VLLM, TRAIL_BASELINE_SCRIPT_API,
     TRAIL_EDGE_SCRIPT_VLLM, TRAIL_EDGE_SCRIPT_ARC,
@@ -109,7 +109,7 @@ def _mast_vllm_cmd(bb, variant: str, sample_idx: int) -> list[str]:
             "--output_dir", str(out),
             "--temperature", str(TEMPERATURE),
             "--seed", str(sample_idx),
-            "--edge_threshold", str(CORR_THRESHOLD),
+            "--edge_threshold", str(MAST_EDGE_THRESHOLD),
             "--suppes_graph", BENCHMARKS["mast"]["suppes_graph"],
             "--effect_edges", BENCHMARKS["mast"]["effect_edges"],
             "--max_model_len", str(bb["max_model_len_mast"]),
@@ -142,7 +142,7 @@ def _mast_arc_cmd(bb, variant: str, sample_idx: int) -> list[str]:
             "--output_dir", str(out),
             "--temperature", str(TEMPERATURE),
             "--seed", str(sample_idx),
-            "--edge_threshold", str(CORR_THRESHOLD),
+            "--edge_threshold", str(MAST_EDGE_THRESHOLD),
             "--suppes_graph", BENCHMARKS["mast"]["suppes_graph"],
             "--effect_edges", BENCHMARKS["mast"]["effect_edges"],
         ]

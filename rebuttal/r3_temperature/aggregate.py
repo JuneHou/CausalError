@@ -46,7 +46,10 @@ def _import_trail_scorer():
 
 def score_trail(pred_dir: Path) -> dict:
     """pred_dir is expected to contain per-split subdirs (GAIA_dedup, SWE_Bench_dedup)
-    where each split holds {trace_id}.json prediction files. Returns pooled W-F1/Loc/Joint."""
+    where each split holds {trace_id}.json prediction files. Returns per-split metrics
+    {split_name: {weighted_f1, loc, joint}} — GAIA and SWE kept SEPARATE to match the
+    main results table. (Pooling GAIA+SWE is the held-out experiment's convention, not
+    the randomized-variance table.)"""
     trail_main = _import_trail_scorer()
     bench_dir = TRAIL_ROOT / "benchmarking"
     per_split_metrics: dict[str, dict] = {}
@@ -102,19 +105,10 @@ def score_trail(pred_dir: Path) -> dict:
             "loc":         res.get("location_accuracy"),
             "joint":       res.get("joint_accuracy"),
         }
-    if not per_split_metrics:
-        return {}
-    pooled = {}
-    for metric in ("weighted_f1", "loc", "joint"):
-        num, den = 0.0, 0
-        for split, m in per_split_metrics.items():
-            v = m.get(metric)
-            if v is not None:
-                num += v * per_split_n[split]
-                den += per_split_n[split]
-        if den:
-            pooled[metric] = num / den
-    return pooled
+    # Return per-split metrics (GAIA / SWE kept separate to match the main results
+    # table). per_split_n is retained above for completeness checks but no longer
+    # pooled — the randomized-variance table reports each split as its own cell.
+    return per_split_metrics
 
 
 def score_mast(pred_dir: Path) -> dict:
@@ -218,45 +212,59 @@ def main():
     rows = []
     skipped = []  # (bb, bench, variant, reason)
 
+    # Report cells: TRAIL is split into GAIA / SWE to match the main results table;
+    # MAST stays a single corpus.
+    TRAIL_SPLIT_LABEL = {"GAIA_dedup": "trail-GAIA", "SWE_Bench_dedup": "trail-SWE"}
+
     for bb_key in bb_keys:
         for benchmark in BENCHMARKS:
             for variant in ("baseline", "edge"):
                 if not _cell_complete(benchmark, bb_key, variant):
                     skipped.append((bb_key, benchmark, variant, "incomplete: missing samples or split"))
                     continue
-                # temp=0.7 samples
-                f1s = []
+                # Per-sample weighted-F1, keyed by report cell. TRAIL yields one
+                # entry per split; MAST a single "mast" entry.
+                cell_f1s = defaultdict(list)
                 for sample_idx in range(1, N_SAMPLES + 1):
                     pred_dir = PREDICTIONS_DIR / benchmark / bb_key / variant / f"temp{TEMPERATURE}_sample{sample_idx}"
                     if benchmark == "trail":
-                        m = score_trail(pred_dir)
+                        split_metrics = score_trail(pred_dir)   # {split_name: {weighted_f1, loc, joint}}
+                        for split_name, m in split_metrics.items():
+                            label = TRAIL_SPLIT_LABEL.get(split_name, f"trail-{split_name}")
+                            rows.append({
+                                "backbone": bb_key, "benchmark": label, "variant": variant,
+                                "scope": f"temp{TEMPERATURE}_sample{sample_idx}", **m,
+                            })
+                            if m.get("weighted_f1") is not None:
+                                cell_f1s[label].append(m["weighted_f1"])
                     else:
                         m = score_mast(pred_dir)
-                    if not m:
+                        if not m:
+                            continue
+                        rows.append({
+                            "backbone": bb_key, "benchmark": "mast", "variant": variant,
+                            "scope": f"temp{TEMPERATURE}_sample{sample_idx}", **m,
+                        })
+                        if m.get("weighted_f1") is not None:
+                            cell_f1s["mast"].append(m["weighted_f1"])
+                # mean±σ per report cell
+                for label, f1s in cell_f1s.items():
+                    if len(f1s) < N_SAMPLES:
+                        skipped.append((bb_key, label, variant,
+                                        f"scorer produced {len(f1s)}/{N_SAMPLES} samples"))
+                        continue
+                    sd = statistics.stdev(f1s)
+                    if sd < SIGMA_FLOOR:
+                        skipped.append((bb_key, label, variant,
+                                        f"sigma={sd:.2e} below floor (seed didn't vary)"))
                         continue
                     rows.append({
-                        "backbone": bb_key, "benchmark": benchmark, "variant": variant,
-                        "scope": f"temp{TEMPERATURE}_sample{sample_idx}",
-                        **m,
+                        "backbone": bb_key, "benchmark": label, "variant": variant,
+                        "scope":      f"temp{TEMPERATURE}_mean",
+                        "weighted_f1": statistics.mean(f1s),
+                        "weighted_f1_std": sd,
+                        "n_samples":  len(f1s),
                     })
-                    if m.get("weighted_f1") is not None:
-                        f1s.append(m["weighted_f1"])
-                if len(f1s) < N_SAMPLES:
-                    skipped.append((bb_key, benchmark, variant,
-                                    f"scorer produced {len(f1s)}/{N_SAMPLES} samples"))
-                    continue
-                sd = statistics.stdev(f1s)
-                if sd < SIGMA_FLOOR:
-                    skipped.append((bb_key, benchmark, variant,
-                                    f"sigma={sd:.2e} below floor (seed didn't vary)"))
-                    continue
-                rows.append({
-                    "backbone": bb_key, "benchmark": benchmark, "variant": variant,
-                    "scope":      f"temp{TEMPERATURE}_mean",
-                    "weighted_f1": statistics.mean(f1s),
-                    "weighted_f1_std": sd,
-                    "n_samples":  len(f1s),
-                })
 
     csv_path = RESULTS_DIR / "r3_per_cell_metrics.csv"
     fields = ["backbone", "benchmark", "variant", "scope",
@@ -283,8 +291,9 @@ def main():
         r"\midrule",
     ]
     emitted = 0
+    REPORT_CELLS = ["trail-GAIA", "trail-SWE", "mast"]
     for bb_key in bb_keys:
-        for benchmark in BENCHMARKS:
+        for benchmark in REPORT_CELLS:
             c = by_cell.get((bb_key, benchmark), {})
             mb = c.get(("baseline", f"temp{TEMPERATURE}_mean"))
             me = c.get(("edge",     f"temp{TEMPERATURE}_mean"))
