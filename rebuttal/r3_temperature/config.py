@@ -14,8 +14,19 @@ Scope (locked 2026-05-31):
 from pathlib import Path
 
 # ---------- repo roots ----------
-TRAIL_ROOT = Path("/projects/slmreasoning/junh/causal-error/CausalError")
-MAST_ROOT  = Path("/projects/slmreasoning/junh/causal-error/CausalMAST")
+# Prefer the ARC cluster layout; fall back to the local checkout (this file lives
+# at <repo>/rebuttal/r3_temperature/config.py) so aggregation can run anywhere.
+_ARC_TRAIL_ROOT = Path("/projects/slmreasoning/junh/causal-error/CausalError")
+if _ARC_TRAIL_ROOT.exists():
+    TRAIL_ROOT = _ARC_TRAIL_ROOT
+    MAST_ROOT  = Path("/projects/slmreasoning/junh/causal-error/CausalMAST")
+else:
+    TRAIL_ROOT = Path(__file__).resolve().parents[2]
+    # The MAST repo may be checked out under a few different names locally.
+    MAST_ROOT  = next(
+        (c for c in (TRAIL_ROOT.parent / "CausalMAST", TRAIL_ROOT.parent / "MAST") if c.exists()),
+        TRAIL_ROOT.parent / "CausalMAST",   # absent => MAST aggregation reuses precomputed -metrics.json
+    )
 R3_ROOT    = TRAIL_ROOT / "rebuttal" / "r3_temperature"
 
 # ---------- experiment dials ----------
@@ -104,7 +115,7 @@ BACKBONES = {
         "backend": "vllm",
         "tensor_parallel_size": 4,
         "gpu_memory_utilization": 0.75,
-        "max_model_len_trail": 65536,
+        "max_model_len_trail": 131072,   # gemma-3-27b supports 128K; matches the other backbones
         "max_model_len_mast":  32768,
     },
     "qwenlong-32b": {

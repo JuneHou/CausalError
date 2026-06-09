@@ -128,17 +128,24 @@ def score_mast(pred_dir: Path) -> dict:
             if list(sub.glob("[0-9][0-9][0-9][0-9].json")):
                 target = sub
                 break
-    cmd = [
-        sys.executable, str(MAST_SCORER),
-        "--annotation", str(MAST_ANNOTATION),
-        "--pred_dir", str(target),
-    ]
-    r = subprocess.run(cmd, cwd=MAST_ROOT, capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"  [mast] scorer failed on {target}: {r.stderr[:200]}")
-        return {}
     # Scorer writes a -metrics.json next to pred_dir; parse it directly.
     metrics_file = Path(f"{target}-metrics.json")
+    # On a local checkout the CausalMAST scorer is absent, but the -metrics.json
+    # produced during the run is committed alongside the predictions — reuse it.
+    if MAST_SCORER.exists():
+        cmd = [
+            sys.executable, str(MAST_SCORER),
+            "--annotation", str(MAST_ANNOTATION),
+            "--pred_dir", str(target),
+        ]
+        r = subprocess.run(cmd, cwd=MAST_ROOT, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"  [mast] scorer failed on {target}: {r.stderr[:200]}")
+            if not metrics_file.exists():
+                return {}
+    elif not metrics_file.exists():
+        print(f"  [mast] no scorer and no precomputed metrics for {target}")
+        return {}
     if not metrics_file.exists():
         return {}
     with open(metrics_file) as f:
@@ -200,13 +207,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip_anchor", action="store_true",
                     help="Skip rescoring the existing temp=0 Table-1 prediction dirs.")
+    ap.add_argument("--exclude", nargs="*", default=[],
+                    help="Backbone keys to skip entirely (e.g. --exclude gemma-3-27b "
+                         "for reruns still in flight).")
     args = ap.parse_args()
+
+    bb_keys = [k for k in BACKBONES if k not in args.exclude]
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     rows = []
     skipped = []  # (bb, bench, variant, reason)
 
-    for bb_key in BACKBONES:
+    for bb_key in bb_keys:
         for benchmark in BENCHMARKS:
             for variant in ("baseline", "edge"):
                 if not _cell_complete(benchmark, bb_key, variant):
@@ -271,7 +283,7 @@ def main():
         r"\midrule",
     ]
     emitted = 0
-    for bb_key in BACKBONES:
+    for bb_key in bb_keys:
         for benchmark in BENCHMARKS:
             c = by_cell.get((bb_key, benchmark), {})
             mb = c.get(("baseline", f"temp{TEMPERATURE}_mean"))
