@@ -218,7 +218,9 @@ def main():
 
     model_tag = args.model.replace("/", "-")
     suffix = "_span_index" if args.span_index else ""
-    out_dir = os.path.join(args.output_dir, f"outputs_{model_tag}-{args.split}{suffix}")
+    temp_tag = f"_t{args.temperature}" if args.temperature > 0 else ""
+    seed_tag = f"_s{args.seed}" if args.seed != 0 else ""
+    out_dir = os.path.join(args.output_dir, f"outputs_{model_tag}-{args.split}{suffix}{temp_tag}{seed_tag}")
     os.makedirs(out_dir, exist_ok=True)
 
     # If data_dir already contains JSON files directly, use it as-is;

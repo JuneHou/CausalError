@@ -566,9 +566,11 @@ def main():
     # ------------------------------------------------------------------
     model_tag  = args.model.replace("/", "-")
     span_tag   = "_span_index" if args.span_index else ""
+    temp_tag   = f"_t{args.temperature}" if args.temperature > 0 else ""
+    seed_tag   = f"_s{args.seed}" if args.seed != 0 else ""
     out_dir = os.path.join(
         args.output_dir,
-        f"outputs_{model_tag}-{args.split}-graph_inject_{graph_tag}{span_tag}",
+        f"outputs_{model_tag}-{args.split}-graph_inject_{graph_tag}{span_tag}{temp_tag}{seed_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
