@@ -29,8 +29,25 @@ SBATCH_DIR = Path(__file__).resolve().parent
 
 TEMPERATURE = "0.7"
 N_SAMPLES = 3
-CORR_THRESHOLD = "0.35"
+# Per-benchmark corr-union optimum (main-results table): TRAIL tau=0.35, MAST tau=0.50.
+# These are NOT the same value -- a single shared threshold is the bug that sent MAST
+# edge runs to tau=0.35. Threshold is applied at RUNTIME (filters suppes_graph edges by
+# geomean score), so no graph rebuild is needed; only the edge variant consults it.
+CORR_THRESHOLD = "0.35"       # TRAIL --corr_threshold
+MAST_EDGE_THRESHOLD = "0.5"   # MAST --edge_threshold
 MAST_MAX_MODEL_LEN = "32768"
+
+# Per-job wall-time. Sized from observed runtimes so SLURM can backfill into smaller
+# gaps and start sooner (a 12h request waits for a 12h hole). MAST combined baseline+edge
+# ran <=2.88h (qwenlong) at tau=0.35; edge-only at tau=0.50 is lighter, so 4h is ~1.4x
+# headroom. TRAIL stays 12h (edge sweeps GAIA+SWE x 3 samples, genuinely long).
+WALLTIME = {
+    ("mast", "baseline"): "02:00:00",
+    ("mast", "edge"):     "04:00:00",
+    ("trail", "baseline"): "12:00:00",
+    ("trail", "edge"):     "12:00:00",
+}
+DEFAULT_WALLTIME = "12:00:00"
 
 # TRAIL graph artifacts (full-corpus tau=0.35, no rebuild)
 TRAIL_SUPPES = f"{REPO_DIR}/benchmarking/data/trail_causal_outputs_full_gaia_swe_AIC/suppes_graph.json"
@@ -76,7 +93,7 @@ HEADER = """#!/bin/bash
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --mem=256G
-#SBATCH --time=12:00:00
+#SBATCH --time={walltime}
 #SBATCH -o slurm.%x.%j.out
 #SBATCH -e slurm.%x.%j.err
 
@@ -232,6 +249,7 @@ def render(bb, cfg, bench, variant):
     header = HEADER.format(
         bb=bb, bench=bench, variant=variant, env=ENV_PATH, repo=REPO_DIR, mast=MAST_DIR,
         model_path=cfg["model_path"], model_tag=cfg["model_tag"],
+        walltime=WALLTIME.get((bench, variant), DEFAULT_WALLTIME),
         hf_override=(HF_OVERRIDE if cfg["hf_cache"] else ""),
     )
     if bench == "trail":
@@ -242,7 +260,7 @@ def render(bb, cfg, bench, variant):
     else:
         body = BODIES[(bench, variant)].format(
             bb=bb, n_samples=N_SAMPLES, temp=TEMPERATURE, mlm=MAST_MAX_MODEL_LEN,
-            corr=CORR_THRESHOLD, mast_input=MAST_INPUT,
+            corr=MAST_EDGE_THRESHOLD, mast_input=MAST_INPUT,
             mast_suppes=MAST_SUPPES, mast_effect=MAST_EFFECT,
         )
     return header + body

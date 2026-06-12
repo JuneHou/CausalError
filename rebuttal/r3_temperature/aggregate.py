@@ -31,6 +31,7 @@ from config import (
     BACKBONES, BENCHMARKS, TEMPERATURE, N_SAMPLES,
     PREDICTIONS_DIR, RESULTS_DIR, TRAIL_ROOT, MAST_ROOT,
     TRAIL_SCORER, MAST_SCORER, MAST_ANNOTATION,
+    MAST_EDGE_THRESHOLD,
 )
 
 
@@ -117,11 +118,18 @@ def score_mast(pred_dir: Path) -> dict:
     target = pred_dir
     rec_files = [f for f in target.glob("*.json") if f.name[:4].isdigit()]
     if not rec_files:
-        subdirs = [d for d in target.iterdir() if d.is_dir()]
-        for sub in subdirs:
-            if list(sub.glob("[0-9][0-9][0-9][0-9].json")):
-                target = sub
-                break
+        subdirs = [d for d in target.iterdir()
+                   if d.is_dir() and list(d.glob("[0-9][0-9][0-9][0-9].json"))]
+        # A superseded edge run (e.g. the wrong-tau t0.35) can sit beside the
+        # correct one, and iterdir() order is arbitrary -- prefer the subdir
+        # tagged with the configured MAST edge threshold so we score t0.5, not
+        # whichever happens to come first. Baseline dirs carry no such tag and
+        # fall through to the single available subdir.
+        edge_tag = f"graph-inject-t{MAST_EDGE_THRESHOLD:g}"
+        preferred = [d for d in subdirs if edge_tag in d.name]
+        chosen = preferred or subdirs
+        if chosen:
+            target = chosen[0]
     # Scorer writes a -metrics.json next to pred_dir; parse it directly.
     metrics_file = Path(f"{target}-metrics.json")
     # On a local checkout the CausalMAST scorer is absent, but the -metrics.json
