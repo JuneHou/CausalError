@@ -100,7 +100,7 @@ BACKBONES = {
         "tensor_parallel_size": 4,
         "gpu_memory_utilization": 0.75,
         "max_model_len_trail": 131072,
-        "max_model_len_mast":  32768,
+        "max_model_len_mast":  108000,
     },
     "gpt-oss-120b": {
         "model_tag": "openai-gpt-oss-120b",
@@ -116,7 +116,7 @@ BACKBONES = {
         "tensor_parallel_size": 4,
         "gpu_memory_utilization": 0.75,
         "max_model_len_trail": 131072,
-        "max_model_len_mast":  32768,
+        "max_model_len_mast":  108000,
     },
     "gemma-3-27b": {
         "model_tag": "openai-gemma-3-27b-it",  # matches main-paper dir naming
@@ -126,7 +126,7 @@ BACKBONES = {
         "tensor_parallel_size": 4,
         "gpu_memory_utilization": 0.75,
         "max_model_len_trail": 131072,   # gemma-3-27b supports 128K; matches the other backbones
-        "max_model_len_mast":  32768,
+        "max_model_len_mast":  108000,
     },
     "qwenlong-32b": {
         "model_tag": "Tongyi-Zhiwen-QwenLong-L1-32B",
@@ -136,7 +136,7 @@ BACKBONES = {
         "tensor_parallel_size": 4,
         "gpu_memory_utilization": 0.75,
         "max_model_len_trail": 131072,
-        "max_model_len_mast":  32768,
+        "max_model_len_mast":  128000,
     },
 }
 

@@ -41,7 +41,10 @@ N_SAMPLES = 3
 # method; substituting it is the bug behind the discarded 06-05/06-12 MAST edge runs.
 CORR_THRESHOLD = "0.35"       # TRAIL --corr_threshold
 MAST_EDGE_THRESHOLD = "0.5"   # MAST  --corr_threshold (full_run_eval_graph_inject.py)
-MAST_MAX_MODEL_LEN = "32768"
+# MAST max_model_len is per-backbone ("mlm" in BACKBONES), matching the values the
+# main-table runs used (MAST/eval/run_threshold_sweep.sh + run_eval_yesno_vllm.py
+# default): 108000 for mistral/gemma/gpt-oss, 128000 for qwenlong. MAST traces max
+# out near ~8k tokens, so this only sizes the KV cache — but keep protocol identical.
 
 # Per-job wall-time. Sized from observed runtimes so SLURM can backfill into smaller
 # gaps and start sooner (a 12h request waits for a 12h hole). MAST combined baseline+edge
@@ -72,22 +75,22 @@ BACKBONES = {
     "gpt-oss-120b": {
         "model_path": "/common/data/models/openai--gpt-oss-120b",
         "model_tag":  "openai-gpt-oss-120b",
-        "mlt": "131072", "hf_cache": False,
+        "mlt": "131072", "mlm": "108000", "hf_cache": False,
     },
     "gpt-oss-20b": {
         "model_path": "/common/data/models/openai--gpt-oss-20b",
         "model_tag":  "openai-gpt-oss-20b",
-        "mlt": "131072", "hf_cache": False,
+        "mlt": "131072", "mlm": "108000", "hf_cache": False,
     },
     "gemma-3-27b": {
         "model_path": "/common/data/models/google--gemma-3-27b-it",
         "model_tag":  "openai-gemma-3-27b-it",
-        "mlt": "65536", "hf_cache": False,
+        "mlt": "65536", "mlm": "108000", "hf_cache": False,
     },
     "qwenlong-32b": {
         "model_path": "Tongyi-Zhiwen/QwenLong-L1-32B",
         "model_tag":  "Tongyi-Zhiwen-QwenLong-L1-32B",
-        "mlt": "131072", "hf_cache": True,
+        "mlt": "131072", "mlm": "128000", "hf_cache": True,
     },
 }
 
@@ -265,7 +268,7 @@ def render(bb, cfg, bench, variant):
         )
     else:
         body = BODIES[(bench, variant)].format(
-            bb=bb, n_samples=N_SAMPLES, temp=TEMPERATURE, mlm=MAST_MAX_MODEL_LEN,
+            bb=bb, n_samples=N_SAMPLES, temp=TEMPERATURE, mlm=cfg["mlm"],
             corr=MAST_EDGE_THRESHOLD, mast_input=MAST_INPUT,
             mast_suppes=MAST_SUPPES, mast_effect=MAST_EFFECT,
         )
