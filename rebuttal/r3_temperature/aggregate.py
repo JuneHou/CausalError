@@ -120,16 +120,26 @@ def score_mast(pred_dir: Path) -> dict:
     if not rec_files:
         subdirs = [d for d in target.iterdir()
                    if d.is_dir() and list(d.glob("[0-9][0-9][0-9][0-9].json"))]
-        # A superseded edge run (e.g. the wrong-tau t0.35) can sit beside the
-        # correct one, and iterdir() order is arbitrary -- prefer the subdir
-        # tagged with the configured MAST edge threshold so we score t0.5, not
-        # whichever happens to come first. Baseline dirs carry no such tag and
-        # fall through to the single available subdir.
-        edge_tag = f"graph-inject-t{MAST_EDGE_THRESHOLD:g}"
+        # Superseded edge runs (wrong-tau t0.35, pure-threshold t0.5) can sit
+        # beside the correct one, and iterdir() order is arbitrary -- prefer the
+        # main-table-replicate subdir written by full_run_eval_graph_inject.py
+        # (codename-corr<tau>, union graph), not whichever happens to come first.
+        # Baseline dirs carry no such tag and fall through to the single
+        # available subdir.
+        edge_tag = f"graph-inject-codename-corr{MAST_EDGE_THRESHOLD:g}"
         preferred = [d for d in subdirs if edge_tag in d.name]
-        chosen = preferred or subdirs
-        if chosen:
-            target = chosen[0]
+        if preferred:
+            target = preferred[0]
+        elif len(subdirs) == 1:
+            # Baseline cells have a single untagged subdir — safe to use.
+            target = subdirs[0]
+        elif subdirs:
+            # Multiple subdirs but none is the main-table-replicate run: these
+            # are all superseded edge variants (t0.35 / pure t0.5). Scoring an
+            # arbitrary one would silently resurrect a wrong method — skip.
+            print(f"  [mast] {pred_dir}: no {edge_tag} run yet "
+                  f"(only superseded: {[d.name for d in subdirs]}); skipping")
+            return {}
     # Scorer writes a -metrics.json next to pred_dir; parse it directly.
     metrics_file = Path(f"{target}-metrics.json")
     # On a local checkout the CausalMAST scorer is absent, but the -metrics.json

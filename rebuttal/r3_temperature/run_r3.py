@@ -109,7 +109,7 @@ def _mast_vllm_cmd(bb, variant: str, sample_idx: int) -> list[str]:
             "--output_dir", str(out),
             "--temperature", str(TEMPERATURE),
             "--seed", str(sample_idx),
-            "--edge_threshold", str(MAST_EDGE_THRESHOLD),
+            "--corr_threshold", str(MAST_EDGE_THRESHOLD),
             "--suppes_graph", BENCHMARKS["mast"]["suppes_graph"],
             "--effect_edges", BENCHMARKS["mast"]["effect_edges"],
             "--max_model_len", str(bb["max_model_len_mast"]),
@@ -142,7 +142,7 @@ def _mast_arc_cmd(bb, variant: str, sample_idx: int) -> list[str]:
             "--output_dir", str(out),
             "--temperature", str(TEMPERATURE),
             "--seed", str(sample_idx),
-            "--edge_threshold", str(MAST_EDGE_THRESHOLD),
+            "--corr_threshold", str(MAST_EDGE_THRESHOLD),
             "--suppes_graph", BENCHMARKS["mast"]["suppes_graph"],
             "--effect_edges", BENCHMARKS["mast"]["effect_edges"],
         ]

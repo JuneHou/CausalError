@@ -33,8 +33,14 @@ N_SAMPLES = 3
 # These are NOT the same value -- a single shared threshold is the bug that sent MAST
 # edge runs to tau=0.35. Threshold is applied at RUNTIME (filters suppes_graph edges by
 # geomean score), so no graph rebuild is needed; only the edge variant consults it.
+#
+# MAST edge MUST use eval/full_run_eval_graph_inject.py --corr_threshold (the script
+# that produced the main-table CASCADE cells): UNION (Suppes geomean >= tau) ∪
+# (11 validated causal edges) = 25 edges at tau=0.50. The sibling
+# run_eval_graph_inject.py --edge_threshold is a PURE 15-edge cut — a different
+# method; substituting it is the bug behind the discarded 06-05/06-12 MAST edge runs.
 CORR_THRESHOLD = "0.35"       # TRAIL --corr_threshold
-MAST_EDGE_THRESHOLD = "0.5"   # MAST --edge_threshold
+MAST_EDGE_THRESHOLD = "0.5"   # MAST  --corr_threshold (full_run_eval_graph_inject.py)
 MAST_MAX_MODEL_LEN = "32768"
 
 # Per-job wall-time. Sized from observed runtimes so SLURM can backfill into smaller
@@ -195,7 +201,7 @@ for sample in $(seq 1 {n_samples}); do
   OUT="$R3_DIR/data/predictions/mast/{bb}/$variant/temp{temp}_sample$sample"
   mkdir -p "$OUT"
   echo "=== MAST $variant sample$sample -> $OUT ==="
-  "$PYTHON" -u eval/run_eval_graph_inject.py \\
+  "$PYTHON" -u eval/full_run_eval_graph_inject.py \\
     --model "$MODEL_PATH" \\
     --model_tag "$MODEL_TAG" \\
     --input "{mast_input}" \\
@@ -205,7 +211,7 @@ for sample in $(seq 1 {n_samples}); do
     --tp 4 \\
     --gpu_memory_utilization 0.75 \\
     --max_model_len {mlm} \\
-    --edge_threshold {corr} \\
+    --corr_threshold {corr} \\
     --suppes_graph "{mast_suppes}" \\
     --effect_edges "{mast_effect}"
 done

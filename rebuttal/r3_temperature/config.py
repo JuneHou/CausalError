@@ -33,9 +33,12 @@ R3_ROOT    = TRAIL_ROOT / "rebuttal" / "r3_temperature"
 TEMPERATURE = 0.7
 N_SAMPLES   = 3
 CORR_THRESHOLD      = 0.35   # TRAIL +EDGE geomean threshold (matches main table)
-MAST_EDGE_THRESHOLD = 0.50   # MAST  +EDGE geomean threshold (main table is τ=0.50).
-                             # τ is a PURE Suppes geomean cut; it is NOT unioned with
-                             # the causal-only graph — that is a separate variant.
+MAST_EDGE_THRESHOLD = 0.50   # MAST  +EDGE threshold, passed as --corr_threshold to
+                             # full_run_eval_graph_inject.py. Main-table semantics:
+                             # UNION of (Suppes geomean >= τ) ∪ (11 validated causal
+                             # edges) = 25 edges at τ=0.50. The earlier R3 runs went
+                             # through run_eval_graph_inject.py --edge_threshold
+                             # (PURE 15-edge cut) and do NOT replicate the main table.
 
 # ---------- eval entry points ----------
 # TRAIL
@@ -48,7 +51,10 @@ TRAIL_SCORER               = TRAIL_ROOT / "benchmarking" / "eval" / "calculate_s
 # MAST
 MAST_BASELINE_SCRIPT_VLLM  = MAST_ROOT / "eval" / "run_eval_yesno_vllm.py"
 MAST_BASELINE_SCRIPT_API   = MAST_ROOT / "eval" / "run_eval_yesno_api.py"
-MAST_EDGE_SCRIPT_VLLM      = MAST_ROOT / "eval" / "run_eval_graph_inject.py"
+# +EDGE MUST go through the full_* family — the same scripts that produced the
+# main-table CASCADE cells (outputs_thres/t0.5). run_eval_graph_inject.py is a
+# DIFFERENT method (pure threshold, no union) and must not be substituted here.
+MAST_EDGE_SCRIPT_VLLM      = MAST_ROOT / "eval" / "full_run_eval_graph_inject.py"
 MAST_EDGE_SCRIPT_ARC       = MAST_ROOT / "eval" / "full_run_eval_graph_inject_api_arc.py"
 MAST_SCORER                = MAST_ROOT / "eval" / "calculate_scores_yesno.py"
 
@@ -57,9 +63,9 @@ MAST_SCORER                = MAST_ROOT / "eval" / "calculate_scores_yesno.py"
 TRAIL_SUPPES_GRAPH = TRAIL_ROOT / "benchmarking" / "data" / "trail_causal_outputs_full_gaia_swe_AIC" / "suppes_graph.json"
 TRAIL_EFFECT_EDGES = TRAIL_ROOT / "benchmarking" / "outputs" / "interventions_full_gaia_swe_merged" / "effect_edges.json"
 
-# MAST: +EDGE is a pure Suppes geomean threshold at MAST_EDGE_THRESHOLD (τ=0.50), built
-# from suppes_graph.json only. effect_edges.json is passed but consumed solely by the
-# separate --causal_only variant; the τ-thresholded graph does NOT union with it.
+# MAST: +EDGE replicates the main-table CASCADE graph — --corr_threshold 0.50 in the
+# full_* runners builds the UNION (Suppes geomean >= 0.50) ∪ (11 validated edges from
+# effect_edges.json) = 25 edges, matching outputs_thres/t0.5.
 MAST_SUPPES_GRAPH  = MAST_ROOT / "causal_graph" / "outputs" / "suppes_graph.json"
 MAST_EFFECT_EDGES  = MAST_ROOT / "causal_graph" / "outputs" / "interventions" / "effect_edges.json"
 

@@ -10,9 +10,17 @@ with **3 i.i.d. samples** per cell across all 5 open-weight backbones.
 | Backbones | Mistral-Small-3.1-24B, GPT-oss-120B, GPT-oss-20B, Gemma-3-27B-IT, QwenLong-L1-32B |
 |---|---|
 | Benchmarks | TRAIL combined (GAIA 117 + SWE 31) + MAST (393) — full corpus |
-| Variants | baseline + +EDGE at $\tau{=}0.35$ |
+| Variants | baseline + +EDGE — TRAIL: $\tau{=}0.35$ union (19 edges); MAST: $\tau{=}0.50$ union (25 edges) |
 | Decoding | `temperature=0.7`, 3 independent invocations per cell |
 | Anchor | existing temp=0 Table-1 dirs (no rerun) |
+
+**MAST +EDGE must replicate the main-table CASCADE cells**: use
+`eval/full_run_eval_graph_inject.py --corr_threshold 0.5` (UNION: Suppes geomean
+$\geq\tau$ ∪ 11 validated causal edges = 25; output dirs tagged
+`codename-corr0.5`). The sibling `eval/run_eval_graph_inject.py --edge_threshold`
+is a PURE 15-edge cut — a *different method*; wiring R3 to it is the bug that
+invalidated the 06-05 ($\tau{=}0.35$) and 06-12 ($\tau{=}0.50$ pure) MAST edge
+rounds.
 
 ## Layout
 
@@ -41,7 +49,8 @@ Six eval scripts now accept `--temperature` (default `0.0`, preserves Table 1):
 | trail-benchmark | `benchmarking/eval/run_eval_graph_inject_api_arc.py` |
 | MAST | `eval/run_eval_yesno_vllm.py` |
 | MAST | `eval/run_eval_yesno_api.py` |
-| MAST | `eval/run_eval_graph_inject.py` |
+| MAST | `eval/run_eval_graph_inject.py` (no longer used by R3 — pure-cut variant) |
+| MAST | `eval/full_run_eval_graph_inject.py` (patched 2026-06-12 — the main-table runner R3 now uses) |
 | MAST | `eval/full_run_eval_graph_inject_api_arc.py` |
 
 Originals backed up with `old_` prefix in each `eval/` dir.
